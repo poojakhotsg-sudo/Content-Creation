@@ -36,8 +36,10 @@ export default function CreatorPanel({
   const [filterType, setFilterType] = useState('weeks'); // 'weeks' or 'date'
 
   const [profile, setProfile] = useState(null);
+  const [searchResults, setSearchResults] = useState(null);
   const [items, setItems] = useState([]);
   const [hasSearched, setHasSearched] = useState(false);
+  const [itemsCache, setItemsCache] = useState({});
 
   const [searchLoading, setSearchLoading] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(false);
@@ -48,9 +50,10 @@ export default function CreatorPanel({
   const isLoading = searchLoading || itemsLoading;
 
   async function handleFetch(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     setError('');
     setProfile(null);
+    setSearchResults(null);
     setItems([]);
     setHasSearched(false);
 
@@ -59,8 +62,6 @@ export default function CreatorPanel({
       setError('Please enter a creator name.');
       return;
     }
-
-    let resolvedProfile;
 
     if (searchUrl) {
       setSearchLoading(true);
@@ -74,8 +75,18 @@ export default function CreatorPanel({
         if (!resp.ok) {
           throw new Error(data.error || 'Failed to find creator');
         }
-        resolvedProfile = data;
-        setProfile(data);
+        
+        if (data.channels && Array.isArray(data.channels)) {
+          setSearchResults(data.channels);
+          setHasSearched(true);
+          setSearchLoading(false);
+          return; // Stop here, wait for user to select a channel
+        } else {
+          // Fallback for single profile (e.g. if Instagram ever uses searchUrl)
+          const resolvedProfile = data;
+          setProfile(resolvedProfile);
+          await fetchItems(resolvedProfile);
+        }
       } catch (err) {
         setError(err.message || 'Failed to search for creator');
         setSearchLoading(false);
@@ -83,27 +94,54 @@ export default function CreatorPanel({
       }
       setSearchLoading(false);
     } else {
-      resolvedProfile = buildSearchBody(name);
+      const resolvedProfile = buildSearchBody(name);
+      setProfile(resolvedProfile);
+      setHasSearched(true);
+      await fetchItems(resolvedProfile);
+    }
+  }
+
+  async function fetchItems(resolvedProfile) {
+    setItemsLoading(true);
+    setItems([]);
+    
+    const bodyObj = buildItemsBody(resolvedProfile, days, durationFilter, exactDate, filterType);
+    const cacheKey = JSON.stringify(bodyObj);
+
+    if (itemsCache[cacheKey]) {
+      setItems(itemsCache[cacheKey]);
+      setItemsLoading(false);
+      return;
     }
 
-    setHasSearched(true);
-    setItemsLoading(true);
     try {
       const resp = await fetch(itemsUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildItemsBody(resolvedProfile, days, durationFilter, exactDate, filterType)),
+        body: JSON.stringify(bodyObj),
       });
       const data = await resp.json();
       if (!resp.ok) {
         throw new Error(data.error || 'Failed to fetch recent items');
       }
-      setItems(data[itemsResponseKey] || []);
+      const newItems = data[itemsResponseKey] || [];
+      setItems(newItems);
+      setItemsCache(prev => ({ ...prev, [cacheKey]: newItems }));
     } catch (err) {
       setError(err.message || 'Failed to fetch recent items');
     } finally {
       setItemsLoading(false);
     }
+  }
+
+  function handleSelectChannel(channel) {
+    setProfile(channel);
+    fetchItems(channel);
+  }
+
+  function handleBackToResults() {
+    setProfile(null);
+    setItems([]);
   }
 
   if (selectedItem) {
@@ -188,21 +226,57 @@ export default function CreatorPanel({
 
       {searchLoading && <div className="status">Searching for creator…</div>}
 
+      {/* Selected Profile View */}
       {normalizedProfile && (
-        <div className="channel-card">
-          {normalizedProfile.thumbnail && (
-            <img src={normalizedProfile.thumbnail} alt={normalizedProfile.title} />
+        <div className="channel-card-header">
+          {searchResults && (
+            <button className="back-button" onClick={handleBackToResults} disabled={itemsLoading} style={{ marginTop: '-10px', marginBottom: '10px' }}>
+              &larr; Back to results
+            </button>
           )}
-          <div>
-            <div className="channel-title">{normalizedProfile.title}</div>
-            <div className="channel-subs">{normalizedProfile.subtitle}</div>
+          <div className="channel-card">
+            {normalizedProfile.thumbnail && (
+              <img src={normalizedProfile.thumbnail} alt={normalizedProfile.title} onError={(e) => { e.target.onerror = null; e.target.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="%23ccc"/><text x="50" y="55" font-family="sans-serif" font-size="30" text-anchor="middle" fill="%23666">?</text></svg>'; }} />
+            )}
+            <div>
+              <div className="channel-title">{normalizedProfile.title}</div>
+              <div className="channel-subs">{normalizedProfile.subtitle}</div>
+              {normalizedProfile.description && (
+                <div className="channel-desc">{normalizedProfile.description}</div>
+              )}
+            </div>
           </div>
+        </div>
+      )}
+
+      {/* Search Results View */}
+      {!profile && searchResults && searchResults.length > 0 && (
+        <div className="search-results-grid">
+          {searchResults.map((ch) => {
+            const norm = normalizeProfile(ch);
+            return (
+              <div key={ch.channelId || norm.title} className="channel-card clickable" onClick={() => handleSelectChannel(ch)}>
+                {norm.thumbnail && (
+                  <img src={norm.thumbnail} alt={norm.title} onError={(e) => { e.target.onerror = null; e.target.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="%23ccc"/><text x="50" y="55" font-family="sans-serif" font-size="30" text-anchor="middle" fill="%23666">?</text></svg>'; }} />
+                )}
+                <div>
+                  <div className="channel-title">{norm.title}</div>
+                  <div className="channel-subs">{norm.subtitle}</div>
+                  {norm.description && <div className="channel-desc">{norm.description}</div>}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
       {itemsLoading && <div className="status">Loading recent {itemsResponseKey}…</div>}
 
-      {!itemsLoading && hasSearched && items.length === 0 && !error && (
+      {!itemsLoading && hasSearched && !profile && searchResults && searchResults.length === 0 && !error && (
+        <div className="status">No matching channels found.</div>
+      )}
+
+      {!itemsLoading && hasSearched && profile && items.length === 0 && !error && (
         <div className="status">{emptyMessage}</div>
       )}
 
@@ -213,7 +287,7 @@ export default function CreatorPanel({
             return (
               <div key={item.key} className="video-card">
                 <a href={item.url} target="_blank" rel="noreferrer">
-                  {item.thumbnail && <img src={item.thumbnail} alt={item.title} />}
+                  {item.thumbnail && <img src={item.thumbnail} alt={item.title} onError={(e) => { e.target.onerror = null; e.target.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="%23ccc"/><text x="50" y="55" font-family="sans-serif" font-size="30" text-anchor="middle" fill="%23666">?</text></svg>'; }} />}
                   <div className="video-info">
                     {item.badge && <span className="item-badge">{item.badge}</span>}
                     <div className="video-title">{item.title}</div>

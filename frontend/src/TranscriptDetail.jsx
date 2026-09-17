@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 export default function TranscriptDetail({
   item,
@@ -10,11 +10,18 @@ export default function TranscriptDetail({
   noTranscriptHint,
   skipTranscript = false,
   skipMessage,
+  enableWatchFallback = false,
 }) {
   const [transcript, setTranscript] = useState('');
   const [loading, setLoading] = useState(!skipTranscript);
   const [error, setError] = useState('');
   const [expanded, setExpanded] = useState(false);
+
+  // Automatic /watch skill fallback when the primary fetch fails/times out
+  // (Instagram only — see enableWatchFallback). Reuses `error` for its own
+  // failure so the existing manual-paste fallback UI still applies.
+  const [fallbackActive, setFallbackActive] = useState(false);
+  const fallbackPollRef = useRef(null);
 
   // Manual transcript paste fallback (shown when auto-fetch fails)
   const [manualText, setManualText] = useState('');
@@ -94,9 +101,63 @@ export default function TranscriptDetail({
     handleGenerateAssetsBreakdown();
   }
 
+  function stopFallbackPolling() {
+    if (fallbackPollRef.current) {
+      clearInterval(fallbackPollRef.current);
+      fallbackPollRef.current = null;
+    }
+  }
+
+  async function pollFallbackStatus(jobId, cancelledRef) {
+    try {
+      const resp = await fetch(`/api/watch-status/${jobId}`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Backup method failed');
+
+      if (data.status === 'done') {
+        stopFallbackPolling();
+        if (cancelledRef.current) return;
+        setFallbackActive(false);
+        setTranscript(data.result.transcript);
+        setError('');
+      } else if (data.status === 'failed') {
+        stopFallbackPolling();
+        if (cancelledRef.current) return;
+        setFallbackActive(false);
+        setError(data.error || 'Backup method failed');
+      }
+      // else still processing — keep polling
+    } catch (err) {
+      stopFallbackPolling();
+      if (cancelledRef.current) return;
+      setFallbackActive(false);
+      setError(err.message || 'Backup method failed');
+    }
+  }
+
+  async function startWatchFallback(videoUrl, cancelledRef) {
+    setFallbackActive(true);
+    try {
+      const resp = await fetch('/api/watch-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: videoUrl }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to start backup watch job');
+      if (cancelledRef.current) return;
+      fallbackPollRef.current = setInterval(() => pollFallbackStatus(data.jobId, cancelledRef), 4000);
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setFallbackActive(false);
+      setError(err.message || 'Backup method failed');
+    }
+  }
+
   useEffect(() => {
     if (skipTranscript) return;
     let cancelled = false;
+    const cancelledRef = { current: false };
     async function fetchTranscript() {
       setLoading(true);
       setError('');
@@ -111,13 +172,21 @@ export default function TranscriptDetail({
         if (!resp.ok) throw new Error(data.error || 'Failed to fetch transcript');
         if (!cancelled) setTranscript(data.transcript);
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Failed to fetch transcript');
+        if (cancelled) return;
+        setError(err.message || 'Failed to fetch transcript');
+        if (enableWatchFallback) {
+          startWatchFallback(item.url, cancelledRef);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
     fetchTranscript();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      cancelledRef.current = true;
+      stopFallbackPolling();
+    };
   }, [skipTranscript, transcriptUrl, transcriptBodyJson]);
 
   return (
@@ -140,7 +209,8 @@ export default function TranscriptDetail({
         <>
           <h3 className="section-label">Transcript</h3>
           {loading && <div className="status">Fetching transcript…</div>}
-          {error && (
+          {fallbackActive && <div className="status">Trying backup method…</div>}
+          {error && !fallbackActive && (
             <div className="error">
               {error}
               <div className="error-hint">{noTranscriptHint}</div>

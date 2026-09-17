@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import CreatorPanel from './CreatorPanel.jsx';
 import TranscriptDetail from './TranscriptDetail.jsx';
+import WatchVideo from './WatchVideo.jsx';
 
 function timeSince(publishedAt) {
   const seconds = Math.floor((Date.now() - new Date(publishedAt).getTime()) / 1000);
@@ -51,6 +52,7 @@ const YOUTUBE_CONFIG = {
     title: data.title,
     subtitle: `${formatViews(data.subscriberCount)} subscribers`,
     thumbnail: data.thumbnail,
+    description: data.description,
   }),
   normalizeItem: (v) => ({
     key: v.videoId,
@@ -80,16 +82,24 @@ const YOUTUBE_CONFIG = {
 };
 
 const INSTAGRAM_CONFIG = {
-  creatorPlaceholder: 'Instagram username',
+  creatorPlaceholder: 'Search query (e.g. fitness coach, AI automation)',
+  searchUrl: '/api/instagram/search',
   itemsUrl: '/api/instagram/recent-posts',
   itemsResponseKey: 'posts',
   showDurationFilter: false,
   showExactDateFilter: true,
-  buildSearchBody: (name) => ({ username: name.replace(/^@/, '') }),
+  buildSearchBody: (name) => ({ username: name }),
   buildItemsBody: (profile, days, durationFilter, exactDate, filterType) => ({
     username: profile.username,
     days: filterType === 'weeks' ? days : undefined,
     exactDate: filterType === 'date' ? exactDate : undefined,
+  }),
+  normalizeProfile: (data) => ({
+    title: data.title,
+    subtitle: `${formatViews(data.followerCount || 0)} followers`,
+    thumbnail: data.thumbnail ? `/api/instagram/proxy-image?url=${encodeURIComponent(data.thumbnail)}` : null,
+    description: data.description,
+    username: data.username,
   }),
   normalizeItem: (p) => ({
     key: p.postUrl,
@@ -117,6 +127,7 @@ const INSTAGRAM_CONFIG = {
       noTranscriptHint="Go back and pick a different post to try again."
       skipTranscript={!post.isVideo}
       skipMessage="This is a photo post — no transcript available. Use the caption above as reference."
+      enableWatchFallback={post.isVideo}
     />
   ),
 };
@@ -124,6 +135,7 @@ const INSTAGRAM_CONFIG = {
 const TABS = [
   { key: 'youtube', label: 'YouTube', heading: 'YouTube Creator Research', config: YOUTUBE_CONFIG },
   { key: 'instagram', label: 'Instagram', heading: 'Instagram Creator Research', config: INSTAGRAM_CONFIG },
+  { key: 'watch', label: 'Watch Backup', heading: 'Watch Video Analyzer', standalone: true },
 ];
 
 export default function App() {
@@ -146,7 +158,11 @@ export default function App() {
       </aside>
       <main className="page">
         <h2 className="tab-heading">{tab.heading}</h2>
-        <CreatorPanel key={tab.key} {...tab.config} />
+        {tab.standalone ? (
+          <WatchVideo key={tab.key} />
+        ) : (
+          <CreatorPanel key={tab.key} {...tab.config} />
+        )}
       </main>
     </div>
   );
