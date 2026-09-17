@@ -353,6 +353,56 @@ app.post('/api/instagram/search', async (req, res) => {
   }
 });
 
+// POST /api/instagram/search-reels { topic }
+app.post('/api/instagram/search-reels', async (req, res) => {
+  const { topic } = req.body || {};
+
+  if (!topic || typeof topic !== 'string' || !topic.trim()) {
+    return res.status(400).json({ error: 'Topic is required' });
+  }
+
+  if (!APIFY_API_TOKEN) {
+    return res.status(500).json({ error: 'Instagram lookups are not configured (missing Apify token)' });
+  }
+
+  const hashtag = topic.trim().replace(/^#/, '').replace(/\s+/g, '');
+
+  try {
+    const runResp = await axios.post(
+      `https://api.apify.com/v2/actors/apify~instagram-hashtag-scraper/run-sync-get-dataset-items`,
+      {
+        hashtags: [hashtag],
+        resultsLimit: 30,
+      },
+      { params: { token: APIFY_API_TOKEN }, timeout: 120000 }
+    );
+
+    const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
+    const ownerByUrl = new Map();
+    rawItems.forEach((p) => {
+      const url = p?.url;
+      if (url) ownerByUrl.set(url, p.ownerUsername || p.owner?.username || p.username || null);
+    });
+
+    const reels = extractInstagramPosts(runResp.data)
+      .filter((p) => p.isVideo)
+      .map((p) => ({
+        ...p,
+        ownerUsername: ownerByUrl.get(p.postUrl) || null,
+      }));
+
+    return res.json({ reels });
+  } catch (err) {
+    const apifyStatus = err.response?.status;
+    const apifyBody   = err.response?.data;
+    console.error('[instagram/search-reels] Apify error status:', apifyStatus);
+    console.error('[instagram/search-reels] Apify error body:', apifyBody ? JSON.stringify(apifyBody).slice(0, 800) : 'none');
+    console.error('[instagram/search-reels] axios message:', err.message);
+    const detail = apifyBody?.error?.message || apifyBody?.message || err.message || 'Unknown error';
+    return res.status(502).json({ error: `Failed to fetch Reels from Instagram: ${detail}` });
+  }
+});
+
 // GET /api/instagram/proxy-image
 const imageCache = new Map();
 app.get('/api/instagram/proxy-image', async (req, res) => {
@@ -996,6 +1046,10 @@ app.get('/api/watch-status/:jobId', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Backend listening on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Backend listening on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
