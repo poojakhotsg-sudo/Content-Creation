@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -73,35 +75,26 @@ app.post('/api/creator-search', async (req, res) => {
 
     const channels = channelsResp.data.items || [];
 
-    // 3. Exact-title-match filter (case-insensitive)
-    const normalizedTarget = creatorName.trim().toLowerCase();
-    const exactMatches = channels.filter(
-      (ch) => ch.snippet.title.trim().toLowerCase() === normalizedTarget
-    );
-
-    if (exactMatches.length === 0) {
-      return res.status(404).json({ error: `No exact channel title match found for "${creatorName}"` });
-    }
-
-    // 4. Break ties by subscriber count (descending). Hidden subscriber counts treated as 0.
-    exactMatches.sort((a, b) => {
+    // 3. Sort by subscriber count (descending). Hidden subscriber counts treated as 0.
+    channels.sort((a, b) => {
       const subsA = Number(a.statistics.subscriberCount || 0);
       const subsB = Number(b.statistics.subscriberCount || 0);
       return subsB - subsA;
     });
 
-    const winner = exactMatches[0];
-
-    return res.json({
-      channelId: winner.id,
-      title: winner.snippet.title,
+    const mappedChannels = channels.map(ch => ({
+      channelId: ch.id,
+      title: ch.snippet.title,
+      description: ch.snippet.description || '',
       thumbnail:
-        winner.snippet.thumbnails?.high?.url ||
-        winner.snippet.thumbnails?.medium?.url ||
-        winner.snippet.thumbnails?.default?.url ||
+        ch.snippet.thumbnails?.high?.url ||
+        ch.snippet.thumbnails?.medium?.url ||
+        ch.snippet.thumbnails?.default?.url ||
         null,
-      subscriberCount: Number(winner.statistics.subscriberCount || 0),
-    });
+      subscriberCount: Number(ch.statistics.subscriberCount || 0),
+    }));
+
+    return res.json({ channels: mappedChannels });
   } catch (err) {
     console.error('creator-search error:', err.response?.data || err.message);
     return res.status(502).json({ error: 'Failed to search for creator on YouTube' });
@@ -313,6 +306,95 @@ function extractInstagramPosts(datasetItems) {
     .filter(Boolean);
 }
 
+// POST /api/instagram/search
+app.post('/api/instagram/search', async (req, res) => {
+  const { username } = req.body || {};
+
+  if (!username || typeof username !== 'string' || !username.trim()) {
+    return res.status(400).json({ error: 'Search query is required' });
+  }
+
+  if (!APIFY_API_TOKEN) {
+    return res.status(500).json({ error: 'Instagram lookups are not configured (missing Apify token)' });
+  }
+
+  try {
+    const runResp = await axios.post(
+      `https://api.apify.com/v2/actors/apify~instagram-search-scraper/run-sync-get-dataset-items`,
+      {
+        search: username.trim(),
+        searchType: 'user',
+        searchLimit: 30,
+        enhanceUserSearchWithFacebookPage: false,
+        liveSearch: false
+      },
+      { params: { token: APIFY_API_TOKEN }, timeout: 60000 }
+    );
+
+    const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
+
+    const mappedChannels = rawItems.map(p => ({
+      username: p.username,
+      title: p.fullName || p.username,
+      description: p.biography || '',
+      thumbnail: p.profilePicUrlHD || p.profilePicUrl || null,
+      followerCount: Number(p.followersCount || 0)
+    })).filter(ch => ch.username);
+
+    return res.json({ channels: mappedChannels });
+  } catch (err) {
+    const apifyStatus = err.response?.status;
+    const apifyBody   = err.response?.data;
+    console.error('[instagram/search] Apify error status:', apifyStatus);
+    console.error('[instagram/search] Apify error body:', apifyBody ? JSON.stringify(apifyBody).slice(0, 800) : 'none');
+    console.error('[instagram/search] axios message:', err.message);
+    const detail = apifyBody?.error?.message || apifyBody?.message || err.message || 'Unknown error';
+    return res.status(502).json({ error: `Failed to fetch search results from Instagram: ${detail}` });
+  }
+});
+
+// GET /api/instagram/proxy-image
+const imageCache = new Map();
+app.get('/api/instagram/proxy-image', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url is required' });
+
+  try {
+    const parsedUrl = new URL(url);
+    const validHostnames = ['.cdninstagram.com', '.fbcdn.net'];
+    if (!validHostnames.some(h => parsedUrl.hostname.endsWith(h))) {
+      return res.status(403).json({ error: 'URL hostname not allowed' });
+    }
+
+    if (imageCache.has(url)) {
+      const cached = imageCache.get(url);
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(cached.buffer);
+    }
+
+    const imgResp = await axios.get(url, { responseType: 'arraybuffer', timeout: 10000 });
+    const contentType = imgResp.headers['content-type'] || 'image/jpeg';
+    const buffer = Buffer.from(imgResp.data);
+
+    // Basic in-memory cache to prevent re-fetching the same image repeatedly
+    imageCache.set(url, { buffer, contentType });
+    
+    // Optional: limit cache size
+    if (imageCache.size > 500) {
+      const firstKey = imageCache.keys().next().value;
+      imageCache.delete(firstKey);
+    }
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.send(buffer);
+  } catch (err) {
+    console.error('[instagram/proxy-image] Error proxying image:', err.message);
+    return res.status(502).json({ error: 'Failed to fetch image' });
+  }
+});
+
 // POST /api/instagram/recent-posts
 app.post('/api/instagram/recent-posts', async (req, res) => {
   const { username, exactDate, days } = req.body || {};
@@ -421,7 +503,9 @@ app.post('/api/instagram/post-transcript', async (req, res) => {
         videoUrls: [postUrl],
         whisperModel: 'base',
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: 300000 }
+      // Kept short (was 300000ms) so a stuck Apify run fails fast and the
+      // frontend can fall back to /api/watch-video instead of hanging.
+      { params: { token: APIFY_API_TOKEN }, timeout: 18000 }
     );
 
     const rawData = runResp.data;
@@ -789,6 +873,126 @@ Respond with ONLY a json object of the form:
     console.error('generate-assets-breakdown error:', err.response?.data || err.message);
     return res.status(502).json({ error: 'Failed to generate assets breakdown from Groq API' });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Watch Video Analyzer — background jobs powered by the Claude Code `/watch`
+// skill (bradautomates/claude-video), run headlessly via `claude -p`.
+// Purely additive: does not touch the YouTube/Instagram fetch → outline →
+// assets flow above. In-memory only (no DB) — jobs are lost on restart.
+// ---------------------------------------------------------------------------
+
+const watchJobs = {}; // jobId -> { status: 'processing' | 'done' | 'failed', result?, error? }
+let watchJobInProgress = false; // simple single-job-at-a-time guard, no queue yet
+
+const WATCH_JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for the `claude -p` call
+
+function buildWatchPrompt(url, businessContext) {
+  return `This is a background job for our own Creator Research app (a Node/Express + React tool for analyzing reference videos). Please use the /watch skill to watch this video and analyze it: ${url}
+
+The analysis is for a creator on our team who wants to make their own version of this content${
+    businessContext && businessContext.trim() ? `, for this business: ${businessContext.trim()}` : ''
+  }.
+
+Once you've watched it (transcript + frame analysis), write your findings back as a single JSON object of this exact shape, and nothing else — no prose, no markdown fencing, just the JSON object itself as your final message:
+{
+  "transcript": string,
+  "outline": { "hook": string[], "demo": string[], "conclusion": string[] },
+  "assetsBreakdown": {
+    "contentType": "demo" | "tutorial" | "walkthrough" | "educational",
+    "steps": [{"stepName": string, "description": string, "difficulty": "Easy" | "Medium" | "Hard"}] | null,
+    "note": string | null
+  }
+}
+Only include steps/tools that are actually shown or described in the video — never invent one. "steps" must be null for demo or educational content (use "note" instead).`;
+}
+
+function runClaudeHeadless(prompt) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'claude',
+      [
+        '-p', prompt,
+        // The /watch skill needs to run ffmpeg/yt-dlp and fetch the video
+        // unattended — there's no one around to answer permission prompts
+        // in a background job, so we pre-authorize tool use here. Requires
+        // the /watch skill's one-time interactive setup (installing
+        // ffmpeg/yt-dlp, API keys) to have already been done on this machine.
+        '--dangerously-skip-permissions',
+      ],
+      { timeout: WATCH_JOB_TIMEOUT_MS, maxBuffer: 20 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          return reject(new Error(stderr?.trim() || err.message || 'claude -p failed'));
+        }
+        resolve(stdout);
+      }
+    );
+  });
+}
+
+function extractJsonObject(text) {
+  const match = String(text || '').match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('No JSON object found in Claude output');
+  return JSON.parse(match[0]);
+}
+
+async function runWatchVideoJob(jobId, url, businessContext) {
+  try {
+    const prompt = buildWatchPrompt(url, businessContext);
+    const stdout = await runClaudeHeadless(prompt);
+    const parsed = extractJsonObject(stdout);
+
+    if (!parsed || typeof parsed.transcript !== 'string' || !parsed.transcript.trim()) {
+      throw new Error('Claude output did not include a transcript');
+    }
+
+    watchJobs[jobId] = {
+      status: 'done',
+      result: {
+        transcript: parsed.transcript.trim(),
+        outline: parsed.outline || null,
+        assetsBreakdown: parsed.assetsBreakdown || null,
+      },
+    };
+  } catch (err) {
+    console.error('watch-video job error:', err.message);
+    watchJobs[jobId] = { status: 'failed', error: err.message || 'Watch job failed' };
+  } finally {
+    watchJobInProgress = false;
+  }
+}
+
+// POST /api/watch-video { url, businessContext? }
+// Starts a background /watch skill run and returns immediately with a jobId.
+app.post('/api/watch-video', (req, res) => {
+  const { url, businessContext } = req.body || {};
+
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return res.status(400).json({ error: 'url is required' });
+  }
+
+  if (watchJobInProgress) {
+    return res.status(429).json({ error: 'A watch job is already running — please wait for it to finish.' });
+  }
+
+  const jobId = crypto.randomUUID();
+  watchJobs[jobId] = { status: 'processing' };
+  watchJobInProgress = true;
+
+  // Fire and forget — runWatchVideoJob handles its own errors internally.
+  runWatchVideoJob(jobId, url.trim(), businessContext);
+
+  return res.json({ jobId });
+});
+
+// GET /api/watch-status/:jobId
+app.get('/api/watch-status/:jobId', (req, res) => {
+  const job = watchJobs[req.params.jobId];
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+  return res.json(job);
 });
 
 const PORT = process.env.PORT || 5000;
