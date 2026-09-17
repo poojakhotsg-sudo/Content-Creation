@@ -4,7 +4,9 @@
   "installCommand": "npm install --prefix frontend && npm install --prefix backend",
   "framework": null,
   "functions": {
-    "backend/server.js": {}
+    "backend/**/*.js": {
+      "maxDuration": 30
+    }
   },
   "rewrites": [
     {
