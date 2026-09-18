@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -524,6 +523,52 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
   }
 });
 
+// Fetches an Instagram video/Reel transcript via the Apify transcript actor.
+// Returns '' when the actor ran fine but produced no transcript; throws only
+// on a genuine request failure or missing config. `timeoutMs` is caller-tunable:
+// the primary route keeps a short fail-fast timeout (see comment below), while
+// the watch-video job (which has no further fallback after this) uses a longer one.
+async function fetchInstagramTranscriptText(postUrl, timeoutMs = 18000) {
+  if (!APIFY_API_TOKEN) {
+    const err = new Error('Transcript fetching is not configured (missing Apify token)');
+    err.status = 500;
+    throw err;
+  }
+
+  try {
+    const runResp = await axios.post(
+      `https://api.apify.com/v2/actors/${APIFY_INSTAGRAM_TRANSCRIPT_ACTOR_ID}/run-sync-get-dataset-items`,
+      {
+        includeSegments: false,
+        transcriptionMethod: 'auto',
+        videoUrls: [postUrl],
+        whisperModel: 'base',
+      },
+      { params: { token: APIFY_API_TOKEN }, timeout: timeoutMs }
+    );
+
+    const rawData = runResp.data;
+    console.log('[instagram-transcript] actor item count:', Array.isArray(rawData) ? rawData.length : typeof rawData);
+    if (Array.isArray(rawData) && rawData.length > 0) {
+      console.log('[instagram-transcript] first item keys:', JSON.stringify(Object.keys(rawData[0])));
+    }
+
+    const transcript = extractTranscriptText(rawData);
+    console.log(`[instagram-transcript] transcript extracted: ${transcript ? `${transcript.length} chars` : 'NONE'}`);
+    return transcript;
+  } catch (err) {
+    const apifyStatus = err.response?.status;
+    const apifyBody   = err.response?.data;
+    console.error('[instagram-transcript] Apify error status:', apifyStatus);
+    console.error('[instagram-transcript] Apify error body:', apifyBody ? JSON.stringify(apifyBody).slice(0, 800) : 'none');
+    console.error('[instagram-transcript] axios message:', err.message);
+    const detail = apifyBody?.error?.message || apifyBody?.message || err.message || 'Unknown error';
+    const publicErr = new Error(`Failed to fetch transcript: ${detail}`);
+    publicErr.status = 502;
+    throw publicErr;
+  }
+}
+
 // POST /api/instagram/post-transcript { postUrl, isVideo }
 app.post('/api/instagram/post-transcript', async (req, res) => {
   const { postUrl, isVideo } = req.body || {};
@@ -540,33 +585,10 @@ app.post('/api/instagram/post-transcript', async (req, res) => {
     return res.status(400).json({ error: 'Transcript not available — this post has no video' });
   }
 
-  if (!APIFY_API_TOKEN) {
-    return res.status(500).json({ error: 'Transcript fetching is not configured (missing Apify token)' });
-  }
-
   try {
-    const runResp = await axios.post(
-      `https://api.apify.com/v2/actors/${APIFY_INSTAGRAM_TRANSCRIPT_ACTOR_ID}/run-sync-get-dataset-items`,
-      {
-        includeSegments: false,
-        transcriptionMethod: 'auto',
-        videoUrls: [postUrl],
-        whisperModel: 'base',
-      },
-      // Kept short (was 300000ms) so a stuck Apify run fails fast and the
-      // frontend can fall back to /api/watch-video instead of hanging.
-      { params: { token: APIFY_API_TOKEN }, timeout: 18000 }
-    );
-
-    const rawData = runResp.data;
-    console.log('[instagram/post-transcript] actor item count:', Array.isArray(rawData) ? rawData.length : typeof rawData);
-    if (Array.isArray(rawData) && rawData.length > 0) {
-      console.log('[instagram/post-transcript] first item keys:', JSON.stringify(Object.keys(rawData[0])));
-      console.log('[instagram/post-transcript] first item (truncated):', JSON.stringify(rawData[0]).slice(0, 600));
-    }
-
-    const transcript = extractTranscriptText(rawData);
-    console.log(`[instagram/post-transcript] transcript extracted: ${transcript ? `${transcript.length} chars` : 'NONE'}`);
+    // Kept short (was 300000ms) so a stuck Apify run fails fast and the
+    // frontend can fall back to /api/watch-video instead of hanging.
+    const transcript = await fetchInstagramTranscriptText(postUrl, 18000);
 
     if (!transcript) {
       return res.status(404).json({
@@ -576,13 +598,7 @@ app.post('/api/instagram/post-transcript', async (req, res) => {
 
     return res.json({ postUrl, transcript });
   } catch (err) {
-    const apifyStatus = err.response?.status;
-    const apifyBody   = err.response?.data;
-    console.error('[instagram/post-transcript] Apify error status:', apifyStatus);
-    console.error('[instagram/post-transcript] Apify error body:', apifyBody ? JSON.stringify(apifyBody).slice(0, 800) : 'none');
-    console.error('[instagram/post-transcript] axios message:', err.message);
-    const detail = apifyBody?.error?.message || apifyBody?.message || err.message || 'Unknown error';
-    return res.status(502).json({ error: `Failed to fetch transcript: ${detail}` });
+    return res.status(err.status || 502).json({ error: err.message });
   }
 });
 
@@ -686,18 +702,14 @@ app.post('/api/instagram/post-transcript-manual', (req, res) => {
   return res.json({ postUrl, transcript: transcript.trim() });
 });
 
-// POST /api/video-transcript { videoId }
-app.post('/api/video-transcript', async (req, res) => {
-  const { videoId } = req.body || {};
-
-  if (!videoId || typeof videoId !== 'string') {
-    return res.status(400).json({ error: 'videoId is required' });
-  }
-
+// Fetches a YouTube video's transcript via the Apify transcript actor.
+// Returns '' when the actor ran fine but produced no transcript (not an
+// error); throws only on a genuine request failure or missing config.
+async function fetchYoutubeTranscriptText(videoId) {
   if (!APIFY_API_TOKEN || APIFY_TRANSCRIPT_ACTOR_ID === 'REPLACE_WITH_ACTOR_ID') {
-    return res.status(500).json({
-      error: 'Transcript fetching is not configured (missing Apify token or actor ID)',
-    });
+    const err = new Error('Transcript fetching is not configured (missing Apify token or actor ID)');
+    err.status = 500;
+    throw err;
   }
 
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
@@ -711,8 +723,25 @@ app.post('/api/video-transcript', async (req, res) => {
         timeout: 60000,
       }
     );
+    return extractTranscriptText(runResp.data);
+  } catch (err) {
+    console.error('fetchYoutubeTranscriptText error:', err.response?.data || err.message);
+    const publicErr = new Error('Failed to fetch transcript for this video');
+    publicErr.status = 502;
+    throw publicErr;
+  }
+}
 
-    const transcript = extractTranscriptText(runResp.data);
+// POST /api/video-transcript { videoId }
+app.post('/api/video-transcript', async (req, res) => {
+  const { videoId } = req.body || {};
+
+  if (!videoId || typeof videoId !== 'string') {
+    return res.status(400).json({ error: 'videoId is required' });
+  }
+
+  try {
+    const transcript = await fetchYoutubeTranscriptText(videoId);
 
     if (!transcript) {
       return res.status(404).json({ error: 'Transcript not available for this video' });
@@ -720,27 +749,31 @@ app.post('/api/video-transcript', async (req, res) => {
 
     return res.json({ videoId, transcript });
   } catch (err) {
-    console.error('video-transcript error:', err.response?.data || err.message);
-    return res.status(502).json({ error: 'Failed to fetch transcript for this video' });
+    return res.status(err.status || 502).json({ error: err.message });
   }
 });
 
-// POST /api/generate-outline { transcript, businessContext }
-app.post('/api/generate-outline', async (req, res) => {
-  const { transcript, businessContext } = req.body || {};
+function truncateForPrompt(transcript) {
+  return transcript.length > 12000
+    ? transcript.substring(0, 12000) + '\n...[TRUNCATED FOR LENGTH]'
+    : transcript;
+}
 
-  if (!transcript || typeof transcript !== 'string' || !transcript.trim()) {
-    return res.status(400).json({ error: 'transcript is required' });
-  }
-  if (!businessContext || typeof businessContext !== 'string' || !businessContext.trim()) {
-    return res.status(400).json({ error: 'businessContext is required' });
-  }
-
+// Shared Groq call behind /api/generate-outline and the watch-video job.
+// businessContext may be blank here (the watch job doesn't require one) —
+// the /api/generate-outline route enforces its own "required" rule before
+// calling this.
+async function generateOutlineFromTranscript(transcript, businessContext) {
   if (!GROQ_API_KEY) {
-    return res.status(500).json({ error: 'Outline generation is not configured (missing Groq API key)' });
+    const err = new Error('Outline generation is not configured (missing Groq API key)');
+    err.status = 500;
+    throw err;
   }
 
-  const truncatedTranscript = transcript.length > 12000 ? transcript.substring(0, 12000) + '\n...[TRUNCATED FOR LENGTH]' : transcript;
+  const truncatedTranscript = truncateForPrompt(transcript);
+  const contextText = businessContext && businessContext.trim()
+    ? businessContext.trim()
+    : 'No specific business context provided — keep the outline generic enough to adapt to any business.';
 
   const prompt = `You are helping a content creator plan a new video, inspired by a reference video, but built around their own business.
 
@@ -748,7 +781,7 @@ Reference video transcript:
 ${truncatedTranscript}
 
 Creator's business context:
-${businessContext}
+${contextText}
 
 Generate a ROUGH outline only — this is a skeleton to think from, not a script. Output ONLY the following, nothing else:
 
@@ -773,6 +806,7 @@ STRICT RULES — do not violate any of these:
 
 Respond with ONLY a JSON object of the form {"hook": string[], "demo": string[], "conclusion": string[]}. No prose, no markdown, just the JSON object.`;
 
+  let raw;
   try {
     const groqResp = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -790,52 +824,72 @@ Respond with ONLY a JSON object of the form {"hook": string[], "demo": string[],
         timeout: 60000,
       }
     );
-
-    const raw = groqResp.data?.choices?.[0]?.message?.content || '';
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (parseErr) {
-      console.error('generate-outline parse error:', parseErr.message, raw);
-      return res.status(502).json({ error: 'Groq returned an unparseable outline' });
-    }
-
-    const toBulletArray = (val) =>
-      Array.isArray(val)
-        ? val.map((s) => String(s).trim()).filter(Boolean)
-        : [];
-
-    const outline = {
-      hook: toBulletArray(parsed?.hook),
-      demo: toBulletArray(parsed?.demo),
-      conclusion: toBulletArray(parsed?.conclusion),
-    };
-
-    if (!outline.hook.length && !outline.demo.length && !outline.conclusion.length) {
-      return res.status(502).json({ error: 'Groq returned an empty outline' });
-    }
-
-    return res.json({ outline });
+    raw = groqResp.data?.choices?.[0]?.message?.content || '';
   } catch (err) {
     console.error('generate-outline error:', err.response?.data || err.message);
-    return res.status(502).json({ error: 'Failed to generate outline from Groq API' });
+    const publicErr = new Error('Failed to generate outline from Groq API');
+    publicErr.status = 502;
+    throw publicErr;
   }
-});
 
-// POST /api/generate-assets-breakdown { transcript }
-app.post('/api/generate-assets-breakdown', async (req, res) => {
-  const { transcript } = req.body || {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (parseErr) {
+    console.error('generate-outline parse error:', parseErr.message, raw);
+    const err = new Error('Groq returned an unparseable outline');
+    err.status = 502;
+    throw err;
+  }
+
+  const toBulletArray = (val) =>
+    Array.isArray(val)
+      ? val.map((s) => String(s).trim()).filter(Boolean)
+      : [];
+
+  const outline = {
+    hook: toBulletArray(parsed?.hook),
+    demo: toBulletArray(parsed?.demo),
+    conclusion: toBulletArray(parsed?.conclusion),
+  };
+
+  if (!outline.hook.length && !outline.demo.length && !outline.conclusion.length) {
+    const err = new Error('Groq returned an empty outline');
+    err.status = 502;
+    throw err;
+  }
+
+  return outline;
+}
+
+// POST /api/generate-outline { transcript, businessContext }
+app.post('/api/generate-outline', async (req, res) => {
+  const { transcript, businessContext } = req.body || {};
 
   if (!transcript || typeof transcript !== 'string' || !transcript.trim()) {
     return res.status(400).json({ error: 'transcript is required' });
   }
-
-  if (!GROQ_API_KEY) {
-    return res.status(500).json({ error: 'Assets breakdown generation is not configured (missing Groq API key)' });
+  if (!businessContext || typeof businessContext !== 'string' || !businessContext.trim()) {
+    return res.status(400).json({ error: 'businessContext is required' });
   }
 
-  const truncatedTranscript = transcript.length > 12000 ? transcript.substring(0, 12000) + '\n...[TRUNCATED FOR LENGTH]' : transcript;
+  try {
+    const outline = await generateOutlineFromTranscript(transcript, businessContext);
+    return res.json({ outline });
+  } catch (err) {
+    return res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Shared Groq call behind /api/generate-assets-breakdown and the watch-video job.
+async function generateAssetsBreakdownFromTranscript(transcript) {
+  if (!GROQ_API_KEY) {
+    const err = new Error('Assets breakdown generation is not configured (missing Groq API key)');
+    err.status = 500;
+    throw err;
+  }
+
+  const truncatedTranscript = truncateForPrompt(transcript);
 
   const prompt = `You are analyzing reference content for a creator who wants to make their own version of it.
 
@@ -872,6 +926,7 @@ Respond with ONLY a json object of the form:
 }
 "steps" must be null for Demo or Educational content (use "note" instead). No prose, no markdown, just the json object.`;
 
+  let raw;
   try {
     const groqResp = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -889,53 +944,78 @@ Respond with ONLY a json object of the form:
         timeout: 60000,
       }
     );
-
-    const raw = groqResp.data?.choices?.[0]?.message?.content || '';
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (parseErr) {
-      console.error('generate-assets-breakdown parse error:', parseErr.message, raw);
-      return res.status(502).json({ error: 'Groq returned an unparseable assets breakdown' });
-    }
-
-    const validContentTypes = ['demo', 'tutorial', 'walkthrough', 'educational'];
-    const contentType = validContentTypes.includes(parsed?.contentType) ? parsed.contentType : null;
-
-    const steps = Array.isArray(parsed?.steps)
-      ? parsed.steps
-          .filter((s) => s && typeof s === 'object')
-          .map((s) => ({
-            stepName: String(s.stepName || '').trim(),
-            description: String(s.description || '').trim(),
-            difficulty: ['Easy', 'Medium', 'Hard'].includes(s.difficulty) ? s.difficulty : 'Medium',
-          }))
-          .filter((s) => s.stepName)
-      : null;
-
-    return res.json({
-      contentType,
-      steps: steps && steps.length > 0 ? steps : null,
-      note: parsed?.note ? String(parsed.note).trim() : null,
-    });
+    raw = groqResp.data?.choices?.[0]?.message?.content || '';
   } catch (err) {
     console.error('generate-assets-breakdown error:', err.response?.data || err.message);
-    return res.status(502).json({ error: 'Failed to generate assets breakdown from Groq API' });
+    const publicErr = new Error('Failed to generate assets breakdown from Groq API');
+    publicErr.status = 502;
+    throw publicErr;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (parseErr) {
+    console.error('generate-assets-breakdown parse error:', parseErr.message, raw);
+    const err = new Error('Groq returned an unparseable assets breakdown');
+    err.status = 502;
+    throw err;
+  }
+
+  const validContentTypes = ['demo', 'tutorial', 'walkthrough', 'educational'];
+  const contentType = validContentTypes.includes(parsed?.contentType) ? parsed.contentType : null;
+
+  const steps = Array.isArray(parsed?.steps)
+    ? parsed.steps
+        .filter((s) => s && typeof s === 'object')
+        .map((s) => ({
+          stepName: String(s.stepName || '').trim(),
+          description: String(s.description || '').trim(),
+          difficulty: ['Easy', 'Medium', 'Hard'].includes(s.difficulty) ? s.difficulty : 'Medium',
+        }))
+        .filter((s) => s.stepName)
+    : null;
+
+  return {
+    contentType,
+    steps: steps && steps.length > 0 ? steps : null,
+    note: parsed?.note ? String(parsed.note).trim() : null,
+  };
+}
+
+// POST /api/generate-assets-breakdown { transcript }
+app.post('/api/generate-assets-breakdown', async (req, res) => {
+  const { transcript } = req.body || {};
+
+  if (!transcript || typeof transcript !== 'string' || !transcript.trim()) {
+    return res.status(400).json({ error: 'transcript is required' });
+  }
+
+  try {
+    const breakdown = await generateAssetsBreakdownFromTranscript(transcript);
+    return res.json(breakdown);
+  } catch (err) {
+    return res.status(err.status || 502).json({ error: err.message });
   }
 });
 
 // ---------------------------------------------------------------------------
-// Watch Video Analyzer — background jobs powered by the Claude Code `/watch`
-// skill (bradautomates/claude-video), run headlessly via `claude -p`.
-// Purely additive: does not touch the YouTube/Instagram fetch → outline →
-// assets flow above. In-memory only (no DB) — jobs are lost on restart.
+// Watch Video Analyzer — background jobs that fetch a transcript (YouTube via
+// Apify, Instagram via Apify) and run it through the same Groq outline/assets
+// prompts used by the YouTube/Instagram tabs above. Previously this shelled
+// out to the Claude Code CLI's `/watch` skill (video download + frame
+// analysis), which only works on a machine with Claude Code, ffmpeg, and
+// yt-dlp installed — incompatible with Vercel's serverless functions
+// (ephemeral filesystem, no persistent global installs, execution time
+// limits). Frame/visual analysis is dropped; transcript-only analysis
+// matches what the other two tabs already do, and runs anywhere this app's
+// other endpoints already run, local dev included.
+// In-memory only (no DB) — jobs are lost on restart.
 // ---------------------------------------------------------------------------
 
 const watchJobs = {}; // jobId -> { status: 'processing' | 'done' | 'failed', result?, error?, finishedAt? }
 let watchJobInProgress = false; // simple single-job-at-a-time guard, no queue yet
 
-const WATCH_JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for the `claude -p` call
 const WATCH_JOB_TTL_MS = 15 * 60 * 1000; // how long a finished job's result stays fetchable
 const WATCH_JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -950,79 +1030,63 @@ setInterval(() => {
   }
 }, WATCH_JOB_CLEANUP_INTERVAL_MS).unref();
 
-function buildWatchPrompt(url, businessContext) {
-  return `This is a background job for our own Creator Research app (a Node/Express + React tool for analyzing reference videos). Please use the /watch skill to watch this video and analyze it: ${url}
+// Identifies the platform + id/url the transcript fetchers need from a
+// pasted video URL. Returns null for anything unrecognized.
+function parseVideoSource(rawUrl) {
+  const url = String(rawUrl || '').trim();
 
-The analysis is for a creator on our team who wants to make their own version of this content${
-    businessContext && businessContext.trim() ? `, for this business: ${businessContext.trim()}` : ''
-  }.
-
-Once you've watched it (transcript + frame analysis), write your findings back as a single JSON object of this exact shape, and nothing else — no prose, no markdown fencing, just the JSON object itself as your final message:
-{
-  "transcript": string,
-  "outline": { "hook": string[], "demo": string[], "conclusion": string[] },
-  "assetsBreakdown": {
-    "contentType": "demo" | "tutorial" | "walkthrough" | "educational",
-    "steps": [{"stepName": string, "description": string, "difficulty": "Easy" | "Medium" | "Hard"}] | null,
-    "note": string | null
+  const ytMatch = url.match(
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/
+  );
+  if (ytMatch) {
+    return { platform: 'youtube', videoId: ytMatch[1] };
   }
-}
-Only include steps/tools that are actually shown or described in the video — never invent one. "steps" must be null for demo or educational content (use "note" instead).`;
-}
 
-function runClaudeHeadless(prompt) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      'claude',
-      [
-        '-p', prompt,
-        // The /watch skill needs to run ffmpeg/yt-dlp and fetch the video
-        // unattended — there's no one around to answer permission prompts
-        // in a background job, so we pre-authorize tool use here. Requires
-        // the /watch skill's one-time interactive setup (installing
-        // ffmpeg/yt-dlp, API keys) to have already been done on this machine.
-        '--dangerously-skip-permissions',
-      ],
-      { timeout: WATCH_JOB_TIMEOUT_MS, maxBuffer: 20 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) {
-          if (err.code === 'ENOENT') {
-            return reject(new Error(
-              'Video analysis is unavailable in this environment (Claude Code CLI is not installed here). ' +
-              'This feature currently requires running against a host that has it set up — see project docs.'
-            ));
-          }
-          return reject(new Error(stderr?.trim() || err.message || 'claude -p failed'));
-        }
-        resolve(stdout);
-      }
-    );
-  });
-}
+  if (/instagram\.com\/(?:reel|p|tv)\//.test(url)) {
+    return { platform: 'instagram', postUrl: url };
+  }
 
-function extractJsonObject(text) {
-  const match = String(text || '').match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON object found in Claude output');
-  return JSON.parse(match[0]);
+  return null;
 }
 
 async function runWatchVideoJob(jobId, url, businessContext) {
   try {
-    const prompt = buildWatchPrompt(url, businessContext);
-    const stdout = await runClaudeHeadless(prompt);
-    const parsed = extractJsonObject(stdout);
+    const source = parseVideoSource(url);
+    if (!source) {
+      const err = new Error('Unsupported URL — paste a YouTube or Instagram video/Reel link.');
+      err.status = 400;
+      throw err;
+    }
 
-    if (!parsed || typeof parsed.transcript !== 'string' || !parsed.transcript.trim()) {
-      throw new Error('Claude output did not include a transcript');
+    const transcript = source.platform === 'youtube'
+      ? await fetchYoutubeTranscriptText(source.videoId)
+      : await fetchInstagramTranscriptText(source.postUrl, 60000);
+
+    if (!transcript || !transcript.trim()) {
+      throw new Error('Transcript not available for this video');
+    }
+    const trimmedTranscript = transcript.trim();
+
+    // Outline/assets are a bonus on top of the transcript, not a hard
+    // requirement — degrade to null on failure (e.g. Groq misconfigured)
+    // rather than failing the whole job, same leniency the CLI path had.
+    let outline = null;
+    try {
+      outline = await generateOutlineFromTranscript(trimmedTranscript, businessContext);
+    } catch (err) {
+      console.error('watch-video outline generation failed:', err.message);
+    }
+
+    let assetsBreakdown = null;
+    try {
+      assetsBreakdown = await generateAssetsBreakdownFromTranscript(trimmedTranscript);
+    } catch (err) {
+      console.error('watch-video assets breakdown generation failed:', err.message);
     }
 
     watchJobs[jobId] = {
       status: 'done',
-      result: {
-        transcript: parsed.transcript.trim(),
-        outline: parsed.outline || null,
-        assetsBreakdown: parsed.assetsBreakdown || null,
-      },
+      result: { transcript: trimmedTranscript, outline, assetsBreakdown },
       finishedAt: Date.now(),
     };
   } catch (err) {
