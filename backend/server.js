@@ -1021,9 +1021,34 @@ app.post('/api/generate-assets-breakdown', async (req, res) => {
 // @vercel/kv is deprecated (Vercel KV was retired in favor of Marketplace
 // Redis integrations); @upstash/redis is the actively-maintained client it
 // used to wrap internally, with the same get/set/del + nx/ex option shape.
-// Reads UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN from the environment.
+//
+// Built manually (not Redis.fromEnv()) so we can defend against a value
+// pasted into a dashboard env var UI with literal wrapping quote characters
+// still attached (dotenv strips these when loading a .env file locally, but
+// a value typed straight into Vercel's env var UI keeps them verbatim,
+// producing a URL/token string that looks plausible in the dashboard but
+// fails to connect).
 const { Redis } = require('@upstash/redis');
-const redis = Redis.fromEnv();
+
+function cleanEnvValue(val) {
+  if (typeof val !== 'string') return val;
+  return val.trim().replace(/^['"]|['"]$/g, '');
+}
+
+const redisUrl = cleanEnvValue(process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL);
+const redisToken = cleanEnvValue(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN);
+
+// Never log the actual values — only whether they're present/well-formed —
+// so this is safe to leave in place in production logs.
+console.log(
+  '[watch-video] Redis config check: url=%s (%s), token=%s (len=%d)',
+  redisUrl ? 'present' : 'MISSING',
+  redisUrl ? (/^https:\/\//.test(redisUrl) ? 'looks like a valid https URL' : `UNEXPECTED FORMAT: starts with "${redisUrl.slice(0, 12)}..."`) : 'n/a',
+  redisToken ? 'present' : 'MISSING',
+  redisToken ? redisToken.length : 0
+);
+
+const redis = new Redis({ url: redisUrl, token: redisToken });
 
 const WATCH_JOB_KEY_PREFIX = 'watch-job:';
 const WATCH_JOB_TTL_SECONDS = 15 * 60; // how long a finished job's result stays fetchable
@@ -1032,6 +1057,20 @@ const WATCH_JOB_LOCK_TTL_SECONDS = 10 * 60; // safety net: auto-clears if a job 
 
 function watchJobKey(jobId) {
   return `${WATCH_JOB_KEY_PREFIX}${jobId}`;
+}
+
+// Logs everything useful about a Redis failure — message, stack, and any
+// extra fields the Upstash client attaches (e.g. HTTP status/body) — instead
+// of the single err.message string that was previously all that reached the
+// logs, which wasn't enough to tell "bad credentials" apart from "network
+// error" apart from "malformed URL".
+function logRedisError(context, err) {
+  console.error(`[watch-video] Redis error in ${context}:`, {
+    message: err?.message,
+    name: err?.name,
+    stack: err?.stack,
+    ...(err && typeof err === 'object' ? err : {}),
+  });
 }
 
 async function getWatchJob(jobId) {
@@ -1115,9 +1154,17 @@ async function runWatchVideoJob(jobId, url, businessContext) {
     });
   } catch (err) {
     console.error('watch-video job error:', err.message);
-    await setWatchJob(jobId, { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() });
+    try {
+      await setWatchJob(jobId, { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() });
+    } catch (writeErr) {
+      logRedisError('setWatchJob failure write (runWatchVideoJob)', writeErr);
+    }
   } finally {
-    await releaseWatchJobLock();
+    try {
+      await releaseWatchJobLock();
+    } catch (lockErr) {
+      logRedisError('releaseWatchJobLock (runWatchVideoJob)', lockErr);
+    }
   }
 }
 
@@ -1134,7 +1181,7 @@ app.post('/api/watch-video', async (req, res) => {
   try {
     gotLock = await acquireWatchJobLock();
   } catch (err) {
-    console.error('watch-video lock acquire error:', err.message);
+    logRedisError('acquireWatchJobLock (POST /api/watch-video)', err);
     return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
   }
 
@@ -1146,7 +1193,7 @@ app.post('/api/watch-video', async (req, res) => {
   try {
     await setWatchJob(jobId, { status: 'processing' });
   } catch (err) {
-    console.error('watch-video job write error:', err.message);
+    logRedisError('setWatchJob initial write (POST /api/watch-video)', err);
     await releaseWatchJobLock();
     return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
   }
@@ -1163,7 +1210,7 @@ app.get('/api/watch-status/:jobId', async (req, res) => {
   try {
     job = await getWatchJob(req.params.jobId);
   } catch (err) {
-    console.error('watch-status read error:', err.message);
+    logRedisError('getWatchJob (GET /api/watch-status)', err);
     return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
   }
   if (!job) {
