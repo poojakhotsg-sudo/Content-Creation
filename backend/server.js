@@ -932,10 +932,23 @@ Respond with ONLY a json object of the form:
 // assets flow above. In-memory only (no DB) — jobs are lost on restart.
 // ---------------------------------------------------------------------------
 
-const watchJobs = {}; // jobId -> { status: 'processing' | 'done' | 'failed', result?, error? }
+const watchJobs = {}; // jobId -> { status: 'processing' | 'done' | 'failed', result?, error?, finishedAt? }
 let watchJobInProgress = false; // simple single-job-at-a-time guard, no queue yet
 
 const WATCH_JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for the `claude -p` call
+const WATCH_JOB_TTL_MS = 15 * 60 * 1000; // how long a finished job's result stays fetchable
+const WATCH_JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+
+// Periodically drop finished jobs older than the TTL so watchJobs doesn't
+// grow unbounded across a long-running server process.
+setInterval(() => {
+  const now = Date.now();
+  for (const [jobId, job] of Object.entries(watchJobs)) {
+    if (job.finishedAt && now - job.finishedAt > WATCH_JOB_TTL_MS) {
+      delete watchJobs[jobId];
+    }
+  }
+}, WATCH_JOB_CLEANUP_INTERVAL_MS).unref();
 
 function buildWatchPrompt(url, businessContext) {
   return `This is a background job for our own Creator Research app (a Node/Express + React tool for analyzing reference videos). Please use the /watch skill to watch this video and analyze it: ${url}
@@ -973,6 +986,12 @@ function runClaudeHeadless(prompt) {
       { timeout: WATCH_JOB_TIMEOUT_MS, maxBuffer: 20 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
+          if (err.code === 'ENOENT') {
+            return reject(new Error(
+              'Video analysis is unavailable in this environment (Claude Code CLI is not installed here). ' +
+              'This feature currently requires running against a host that has it set up — see project docs.'
+            ));
+          }
           return reject(new Error(stderr?.trim() || err.message || 'claude -p failed'));
         }
         resolve(stdout);
@@ -1004,10 +1023,11 @@ async function runWatchVideoJob(jobId, url, businessContext) {
         outline: parsed.outline || null,
         assetsBreakdown: parsed.assetsBreakdown || null,
       },
+      finishedAt: Date.now(),
     };
   } catch (err) {
     console.error('watch-video job error:', err.message);
-    watchJobs[jobId] = { status: 'failed', error: err.message || 'Watch job failed' };
+    watchJobs[jobId] = { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() };
   } finally {
     watchJobInProgress = false;
   }

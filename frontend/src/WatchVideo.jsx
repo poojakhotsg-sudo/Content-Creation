@@ -12,6 +12,12 @@ export default function WatchVideo() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const pollRef = useRef(null);
+  const pollAttemptsRef = useRef(0);
+
+  // Safety net: matches the backend's 5-minute job timeout plus a buffer,
+  // so a stuck job can't leave the UI polling forever.
+  const POLL_INTERVAL_MS = 4000;
+  const MAX_POLL_ATTEMPTS = Math.ceil((6 * 60 * 1000) / POLL_INTERVAL_MS);
 
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -22,6 +28,16 @@ export default function WatchVideo() {
   }
 
   async function pollStatus(jobId) {
+    pollAttemptsRef.current += 1;
+
+    if (pollAttemptsRef.current > MAX_POLL_ATTEMPTS) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+      setStatus('failed');
+      setError('Timed out waiting for the video analysis to finish. Please try again.');
+      return;
+    }
+
     try {
       const resp = await fetch(`/api/watch-status/${jobId}`);
       const data = await resp.json();
@@ -52,6 +68,7 @@ export default function WatchVideo() {
     setStatus('processing');
     setResult(null);
     setError('');
+    pollAttemptsRef.current = 0;
 
     try {
       const resp = await fetch('/api/watch-video', {
@@ -62,7 +79,7 @@ export default function WatchVideo() {
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to start watch job');
 
-      pollRef.current = setInterval(() => pollStatus(data.jobId), 4000);
+      pollRef.current = setInterval(() => pollStatus(data.jobId), POLL_INTERVAL_MS);
     } catch (err) {
       setStatus('failed');
       setError(err.message || 'Failed to start watch job');
@@ -104,7 +121,10 @@ export default function WatchVideo() {
       </button>
 
       {status === 'processing' && (
-        <div className="status">Watching video and analyzing… this can take a minute or two.</div>
+        <div className="status status-loading">
+          <span className="spinner" aria-hidden="true" />
+          Analyzing video… this can take a minute or two.
+        </div>
       )}
       {status === 'failed' && <div className="error">{error}</div>}
 
