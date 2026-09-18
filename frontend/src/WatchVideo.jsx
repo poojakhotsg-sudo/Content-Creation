@@ -135,33 +135,33 @@ export default function WatchVideo() {
             <p className="transcript-text">{result.transcript}</p>
           </div>
 
-          {result.outline && (
-            <>
-              <h3 className="section-label">Video Outline</h3>
-              <div className="outline-sections">
-                {[
-                  ['Hook', result.outline.hook],
-                  ['Demo', result.outline.demo],
-                  ['Conclusion', result.outline.conclusion],
-                ].map(([label, bullets]) =>
-                  bullets && bullets.length > 0 ? (
-                    <div className="outline-block" key={label}>
-                      <h4 className="outline-block-label">{label}</h4>
-                      <ul className="outline-bullet-list">
-                        {bullets.map((bullet, i) => (
-                          <li key={i}>{bullet}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null
-                )}
-              </div>
-            </>
+          <h3 className="section-label">Video Outline</h3>
+          {result.outline ? (
+            <div className="outline-sections">
+              {[
+                ['Hook', result.outline.hook],
+                ['Demo', result.outline.demo],
+                ['Conclusion', result.outline.conclusion],
+              ].map(([label, bullets]) =>
+                bullets && bullets.length > 0 ? (
+                  <div className="outline-block" key={label}>
+                    <h4 className="outline-block-label">{label}</h4>
+                    <ul className="outline-bullet-list">
+                      {bullets.map((bullet, i) => (
+                        <li key={i}>{bullet}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null
+              )}
+            </div>
+          ) : (
+            <div className="error">{result.outlineError || 'Outline generation failed for an unknown reason.'}</div>
           )}
 
-          {result.assetsBreakdown && (
+          <h3 className="section-label">Required Assets</h3>
+          {result.assetsBreakdown ? (
             <>
-              <h3 className="section-label">Required Assets</h3>
               {result.assetsBreakdown.contentType && (
                 <span
                   className={`content-type-badge content-type-${result.assetsBreakdown.contentType}`}
@@ -190,6 +190,8 @@ export default function WatchVideo() {
                 </ol>
               )}
             </>
+          ) : (
+            <div className="error">{result.assetsError || 'Assets breakdown generation failed for an unknown reason.'}</div>
           )}
         </>
       )}

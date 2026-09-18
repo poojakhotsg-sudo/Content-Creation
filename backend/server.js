@@ -1133,23 +1133,30 @@ async function runWatchVideoJob(jobId, url, businessContext) {
     // Outline/assets are a bonus on top of the transcript, not a hard
     // requirement — degrade to null on failure (e.g. Groq misconfigured)
     // rather than failing the whole job, same leniency the CLI path had.
+    // The failure reason is still surfaced in the result (outlineError /
+    // assetsError) so it's visible to the frontend and diagnosable from the
+    // stored job data, not just a server log line only we can see.
     let outline = null;
+    let outlineError = null;
     try {
       outline = await generateOutlineFromTranscript(trimmedTranscript, businessContext);
     } catch (err) {
       console.error('watch-video outline generation failed:', err.message);
+      outlineError = err.message || 'Outline generation failed';
     }
 
     let assetsBreakdown = null;
+    let assetsError = null;
     try {
       assetsBreakdown = await generateAssetsBreakdownFromTranscript(trimmedTranscript);
     } catch (err) {
       console.error('watch-video assets breakdown generation failed:', err.message);
+      assetsError = err.message || 'Assets breakdown generation failed';
     }
 
     await setWatchJob(jobId, {
       status: 'done',
-      result: { transcript: trimmedTranscript, outline, assetsBreakdown },
+      result: { transcript: trimmedTranscript, outline, outlineError, assetsBreakdown, assetsError },
       finishedAt: Date.now(),
     });
   } catch (err) {
