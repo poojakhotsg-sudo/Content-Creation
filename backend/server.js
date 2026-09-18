@@ -1010,25 +1010,49 @@ app.post('/api/generate-assets-breakdown', async (req, res) => {
 // limits). Frame/visual analysis is dropped; transcript-only analysis
 // matches what the other two tabs already do, and runs anywhere this app's
 // other endpoints already run, local dev included.
-// In-memory only (no DB) — jobs are lost on restart.
+//
+// Job state lives in Vercel KV (Redis-compatible), not process memory — a
+// plain in-memory object only lives inside one serverless instance, and a
+// status poll can land on a different, cold-started instance that never saw
+// the job get created, which is exactly what produced "Job not found" in
+// production. Same reasoning applies to the single-job-at-a-time lock below.
 // ---------------------------------------------------------------------------
 
-const watchJobs = {}; // jobId -> { status: 'processing' | 'done' | 'failed', result?, error?, finishedAt? }
-let watchJobInProgress = false; // simple single-job-at-a-time guard, no queue yet
+// @vercel/kv is deprecated (Vercel KV was retired in favor of Marketplace
+// Redis integrations); @upstash/redis is the actively-maintained client it
+// used to wrap internally, with the same get/set/del + nx/ex option shape.
+// Reads UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN from the environment.
+const { Redis } = require('@upstash/redis');
+const redis = Redis.fromEnv();
 
-const WATCH_JOB_TTL_MS = 15 * 60 * 1000; // how long a finished job's result stays fetchable
-const WATCH_JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const WATCH_JOB_KEY_PREFIX = 'watch-job:';
+const WATCH_JOB_TTL_SECONDS = 15 * 60; // how long a finished job's result stays fetchable
+const WATCH_JOB_LOCK_KEY = 'watch-job-lock';
+const WATCH_JOB_LOCK_TTL_SECONDS = 10 * 60; // safety net: auto-clears if a job crashes without releasing the lock
 
-// Periodically drop finished jobs older than the TTL so watchJobs doesn't
-// grow unbounded across a long-running server process.
-setInterval(() => {
-  const now = Date.now();
-  for (const [jobId, job] of Object.entries(watchJobs)) {
-    if (job.finishedAt && now - job.finishedAt > WATCH_JOB_TTL_MS) {
-      delete watchJobs[jobId];
-    }
-  }
-}, WATCH_JOB_CLEANUP_INTERVAL_MS).unref();
+function watchJobKey(jobId) {
+  return `${WATCH_JOB_KEY_PREFIX}${jobId}`;
+}
+
+async function getWatchJob(jobId) {
+  return redis.get(watchJobKey(jobId));
+}
+
+async function setWatchJob(jobId, data) {
+  await redis.set(watchJobKey(jobId), data, { ex: WATCH_JOB_TTL_SECONDS });
+}
+
+// Atomic across instances: set with nx only succeeds if the key doesn't
+// already exist, so two concurrent requests (even on different cold-started
+// instances) can't both "win" the lock the way the old in-memory boolean could.
+async function acquireWatchJobLock() {
+  const result = await redis.set(WATCH_JOB_LOCK_KEY, '1', { nx: true, ex: WATCH_JOB_LOCK_TTL_SECONDS });
+  return result === 'OK' || result === true;
+}
+
+async function releaseWatchJobLock() {
+  await redis.del(WATCH_JOB_LOCK_KEY);
+}
 
 // Identifies the platform + id/url the transcript fetchers need from a
 // pasted video URL. Returns null for anything unrecognized.
@@ -1084,35 +1108,48 @@ async function runWatchVideoJob(jobId, url, businessContext) {
       console.error('watch-video assets breakdown generation failed:', err.message);
     }
 
-    watchJobs[jobId] = {
+    await setWatchJob(jobId, {
       status: 'done',
       result: { transcript: trimmedTranscript, outline, assetsBreakdown },
       finishedAt: Date.now(),
-    };
+    });
   } catch (err) {
     console.error('watch-video job error:', err.message);
-    watchJobs[jobId] = { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() };
+    await setWatchJob(jobId, { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() });
   } finally {
-    watchJobInProgress = false;
+    await releaseWatchJobLock();
   }
 }
 
 // POST /api/watch-video { url, businessContext? }
 // Starts a background /watch skill run and returns immediately with a jobId.
-app.post('/api/watch-video', (req, res) => {
+app.post('/api/watch-video', async (req, res) => {
   const { url, businessContext } = req.body || {};
 
   if (!url || typeof url !== 'string' || !url.trim()) {
     return res.status(400).json({ error: 'url is required' });
   }
 
-  if (watchJobInProgress) {
+  let gotLock;
+  try {
+    gotLock = await acquireWatchJobLock();
+  } catch (err) {
+    console.error('watch-video lock acquire error:', err.message);
+    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+  }
+
+  if (!gotLock) {
     return res.status(429).json({ error: 'A watch job is already running — please wait for it to finish.' });
   }
 
   const jobId = crypto.randomUUID();
-  watchJobs[jobId] = { status: 'processing' };
-  watchJobInProgress = true;
+  try {
+    await setWatchJob(jobId, { status: 'processing' });
+  } catch (err) {
+    console.error('watch-video job write error:', err.message);
+    await releaseWatchJobLock();
+    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+  }
 
   // Fire and forget — runWatchVideoJob handles its own errors internally.
   runWatchVideoJob(jobId, url.trim(), businessContext);
@@ -1121,8 +1158,14 @@ app.post('/api/watch-video', (req, res) => {
 });
 
 // GET /api/watch-status/:jobId
-app.get('/api/watch-status/:jobId', (req, res) => {
-  const job = watchJobs[req.params.jobId];
+app.get('/api/watch-status/:jobId', async (req, res) => {
+  let job;
+  try {
+    job = await getWatchJob(req.params.jobId);
+  } catch (err) {
+    console.error('watch-status read error:', err.message);
+    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+  }
   if (!job) {
     return res.status(404).json({ error: 'Job not found' });
   }
