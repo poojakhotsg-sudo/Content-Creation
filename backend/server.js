@@ -1190,7 +1190,7 @@ app.post('/api/watch-video', async (req, res) => {
     gotLock = await acquireWatchJobLock();
   } catch (err) {
     logRedisError('acquireWatchJobLock (POST /api/watch-video)', err);
-    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+    return res.status(500).json({ error: `Job storage is unavailable (KV connection failed): ${err.message}` });
   }
 
   if (!gotLock) {
@@ -1203,7 +1203,7 @@ app.post('/api/watch-video', async (req, res) => {
   } catch (err) {
     logRedisError('setWatchJob initial write (POST /api/watch-video)', err);
     await releaseWatchJobLock();
-    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+    return res.status(500).json({ error: `Job storage is unavailable (KV connection failed): ${err.message}` });
   }
 
   // Fire and forget — runWatchVideoJob handles its own errors internally.
@@ -1219,7 +1219,7 @@ app.get('/api/watch-status/:jobId', async (req, res) => {
     job = await getWatchJob(req.params.jobId);
   } catch (err) {
     logRedisError('getWatchJob (GET /api/watch-status)', err);
-    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+    return res.status(500).json({ error: `Job storage is unavailable (KV connection failed): ${err.message}` });
   }
   if (!job) {
     return res.status(404).json({ error: 'Job not found' });
