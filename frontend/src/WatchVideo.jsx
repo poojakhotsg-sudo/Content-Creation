@@ -1,21 +1,40 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 // Standalone "Watch Backup" page — paste a URL, run the /watch skill in the
-// background, poll for the result. Separate from the Instagram/YouTube tabs;
-// does not touch their UI or state.
+// background, poll for the result. Once the transcript is ready, shows the
+// same Generate Outline + Assets Breakdown UI as the YouTube/Instagram pages.
 export default function WatchVideo() {
   const [url, setUrl] = useState('');
   const [businessContext, setBusinessContext] = useState(
     () => localStorage.getItem('businessContext') || ''
   );
-  const [status, setStatus] = useState('idle'); // idle | processing | done | failed
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState('');
+
+  // Watch job state
+  const [jobStatus, setJobStatus] = useState('idle'); // idle | processing | done | failed
+  const [jobError, setJobError] = useState('');
+  const [transcript, setTranscript] = useState('');
   const pollRef = useRef(null);
   const pollAttemptsRef = useRef(0);
 
-  // Safety net: matches the backend's 5-minute job timeout plus a buffer,
-  // so a stuck job can't leave the UI polling forever.
+  // Transcript expand
+  const [expanded, setExpanded] = useState(false);
+
+  // Outline state
+  const [outline, setOutline] = useState(null);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [outlineError, setOutlineError] = useState('');
+
+  // Assets state
+  const [assetSteps, setAssetSteps] = useState(null);
+  const [assetsLoading, setAssetsLoading] = useState(false);
+  const [assetsError, setAssetsError] = useState('');
+  const [contentType, setContentType] = useState(null);
+  const [assetNote, setAssetNote] = useState(null);
+
+  // Active result tab
+  const [activeResultTab, setActiveResultTab] = useState('outline');
+
+  // Safety net: 6-minute ceiling on polling
   const POLL_INTERVAL_MS = 4000;
   const MAX_POLL_ATTEMPTS = Math.ceil((6 * 60 * 1000) / POLL_INTERVAL_MS);
 
@@ -33,8 +52,8 @@ export default function WatchVideo() {
     if (pollAttemptsRef.current > MAX_POLL_ATTEMPTS) {
       clearInterval(pollRef.current);
       pollRef.current = null;
-      setStatus('failed');
-      setError('Timed out waiting for the video analysis to finish. Please try again.');
+      setJobStatus('failed');
+      setJobError('Timed out waiting for the video analysis to finish. Please try again.');
       return;
     }
 
@@ -46,28 +65,35 @@ export default function WatchVideo() {
       if (data.status === 'done') {
         clearInterval(pollRef.current);
         pollRef.current = null;
-        setStatus('done');
-        setResult(data.result);
+        setJobStatus('done');
+        setTranscript(data.result?.transcript || '');
       } else if (data.status === 'failed') {
         clearInterval(pollRef.current);
         pollRef.current = null;
-        setStatus('failed');
-        setError(data.error || 'Watch job failed');
+        setJobStatus('failed');
+        setJobError(data.error || 'Watch job failed');
       }
       // else still processing — keep polling
     } catch (err) {
       clearInterval(pollRef.current);
       pollRef.current = null;
-      setStatus('failed');
-      setError(err.message || 'Failed to check job status');
+      setJobStatus('failed');
+      setJobError(err.message || 'Failed to check job status');
     }
   }
 
   async function handleSubmit() {
-    if (!url.trim() || status === 'processing') return;
-    setStatus('processing');
-    setResult(null);
-    setError('');
+    if (!url.trim() || jobStatus === 'processing') return;
+    setJobStatus('processing');
+    setJobError('');
+    setTranscript('');
+    setOutline(null);
+    setOutlineError('');
+    setAssetSteps(null);
+    setAssetsError('');
+    setContentType(null);
+    setAssetNote(null);
+    setExpanded(false);
     pollAttemptsRef.current = 0;
 
     try {
@@ -81,17 +107,68 @@ export default function WatchVideo() {
 
       pollRef.current = setInterval(() => pollStatus(data.jobId), POLL_INTERVAL_MS);
     } catch (err) {
-      setStatus('failed');
-      setError(err.message || 'Failed to start watch job');
+      setJobStatus('failed');
+      setJobError(err.message || 'Failed to start watch job');
     }
+  }
+
+  async function handleGenerateOutline() {
+    setOutlineLoading(true);
+    setOutlineError('');
+    setOutline(null);
+    setActiveResultTab('outline');
+    try {
+      const resp = await fetch('/api/generate-outline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript, businessContext }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to generate outline');
+      setOutline(data.outline);
+    } catch (err) {
+      setOutlineError(err.message || 'Failed to generate outline');
+    } finally {
+      setOutlineLoading(false);
+    }
+  }
+
+  async function handleGenerateAssetsBreakdown() {
+    setAssetsLoading(true);
+    setAssetsError('');
+    setAssetSteps(null);
+    setContentType(null);
+    setAssetNote(null);
+    setActiveResultTab('assets');
+    try {
+      const resp = await fetch('/api/generate-assets-breakdown', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to generate assets breakdown');
+      setAssetSteps(data.steps || null);
+      setContentType(data.contentType || null);
+      setAssetNote(data.note || null);
+    } catch (err) {
+      setAssetsError(err.message || 'Failed to generate assets breakdown');
+    } finally {
+      setAssetsLoading(false);
+    }
+  }
+
+  function handleGenerateBoth() {
+    handleGenerateOutline();
+    handleGenerateAssetsBreakdown();
   }
 
   return (
     <div className="video-detail">
       <h3 className="section-label">Video URL</h3>
       <p className="reference-note">
-        Paste a YouTube or Instagram video URL. This runs the <code>/watch</code> skill
-        in the background — it can take a minute or two.
+        Paste a YouTube or Instagram video URL. This fetches the transcript in the background — it
+        can take a minute or two.
       </p>
       <input
         className="business-context-input"
@@ -99,14 +176,17 @@ export default function WatchVideo() {
         placeholder="https://…"
         value={url}
         onChange={(e) => setUrl(e.target.value)}
-        disabled={status === 'processing'}
+        disabled={jobStatus === 'processing'}
       />
 
       <h3 className="section-label">Your Business Context</h3>
+      <p className="reference-note">
+        Describe your business/offer once — it's saved locally and reused for outline generation.
+      </p>
       <textarea
         className="business-context-input"
         rows={3}
-        placeholder="e.g. We’re an AI automation agency that builds custom workflows for small businesses"
+        placeholder="e.g. We're an AI automation agency that builds custom workflows for small businesses"
         value={businessContext}
         onChange={(e) => setBusinessContext(e.target.value)}
         onBlur={handleBusinessContextBlur}
@@ -115,84 +195,126 @@ export default function WatchVideo() {
       <button
         className="expand-button generate-both-button"
         onClick={handleSubmit}
-        disabled={!url.trim() || status === 'processing'}
+        disabled={!url.trim() || jobStatus === 'processing'}
       >
-        {status === 'processing' ? 'Processing…' : 'Analyze Video'}
+        {jobStatus === 'processing' ? 'Fetching transcript…' : 'Analyze Video'}
       </button>
 
-      {status === 'processing' && (
+      {jobStatus === 'processing' && (
         <div className="status status-loading">
           <span className="spinner" aria-hidden="true" />
           Analyzing video… this can take a minute or two.
         </div>
       )}
-      {status === 'failed' && <div className="error">{error}</div>}
+      {jobStatus === 'failed' && <div className="error">{jobError}</div>}
 
-      {status === 'done' && result && (
+      {/* Once transcript is ready, show the same UI as other pages */}
+      {jobStatus === 'done' && transcript && (
         <>
           <h3 className="section-label">Transcript</h3>
-          <div className="transcript-box expanded">
-            <p className="transcript-text">{result.transcript}</p>
+          <div className={`transcript-box ${expanded ? 'expanded' : ''}`}>
+            <p className="transcript-text">{transcript}</p>
+            {!expanded && <div className="transcript-fade" />}
           </div>
+          <button className="expand-button" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? 'Collapse' : 'Expand full transcript'}
+          </button>
 
-          <h3 className="section-label">Video Outline</h3>
-          {result.outline ? (
-            <div className="outline-sections">
-              {[
-                ['Hook', result.outline.hook],
-                ['Demo', result.outline.demo],
-                ['Conclusion', result.outline.conclusion],
-              ].map(([label, bullets]) =>
-                bullets && bullets.length > 0 ? (
-                  <div className="outline-block" key={label}>
-                    <h4 className="outline-block-label">{label}</h4>
-                    <ul className="outline-bullet-list">
-                      {bullets.map((bullet, i) => (
-                        <li key={i}>{bullet}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null
-              )}
+          <button
+            className="expand-button generate-both-button"
+            onClick={handleGenerateBoth}
+            disabled={(outlineLoading || assetsLoading) || !businessContext.trim()}
+            title={!businessContext.trim() ? 'Add your business context above before generating' : undefined}
+          >
+            {outlineLoading || assetsLoading ? 'Generating…' : 'Generate Outline + Assets Breakdown'}
+          </button>
+
+          <div className="result-tabs">
+            <div className="result-tab-bar">
+              <button
+                className={`result-tab-btn${activeResultTab === 'outline' ? ' active' : ''}`}
+                onClick={() => setActiveResultTab('outline')}
+              >
+                Video Outline
+              </button>
+              <button
+                className={`result-tab-btn${activeResultTab === 'assets' ? ' active' : ''}`}
+                onClick={() => setActiveResultTab('assets')}
+              >
+                Required Assets
+              </button>
             </div>
-          ) : (
-            <div className="error">{result.outlineError || 'Outline generation failed for an unknown reason.'}</div>
-          )}
 
-          <h3 className="section-label">Required Assets</h3>
-          {result.assetsBreakdown ? (
-            <>
-              {result.assetsBreakdown.contentType && (
-                <span
-                  className={`content-type-badge content-type-${result.assetsBreakdown.contentType}`}
+            {activeResultTab === 'outline' && (
+              <div className="result-tab-panel">
+                <button
+                  className="expand-button"
+                  onClick={handleGenerateOutline}
+                  disabled={outlineLoading || !businessContext.trim()}
+                  title={!businessContext.trim() ? 'Add your business context above first' : undefined}
                 >
-                  {result.assetsBreakdown.contentType.charAt(0).toUpperCase() +
-                    result.assetsBreakdown.contentType.slice(1)}
-                </span>
-              )}
-              {(!result.assetsBreakdown.steps || result.assetsBreakdown.steps.length === 0) &&
-                result.assetsBreakdown.note && (
-                  <div className="status">{result.assetsBreakdown.note}</div>
+                  {outlineLoading ? 'Generating…' : 'Generate Outline'}
+                </button>
+                {outlineLoading && <div className="status">Generating outline…</div>}
+                {outlineError && <div className="error">{outlineError}</div>}
+                {!outlineLoading && !outlineError && outline && (
+                  <div className="outline-sections">
+                    {[['Hook', outline.hook], ['Demo', outline.demo], ['Conclusion', outline.conclusion]].map(
+                      ([label, bullets]) =>
+                        bullets && bullets.length > 0 ? (
+                          <div className="outline-block" key={label}>
+                            <h4 className="outline-block-label">{label}</h4>
+                            <ul className="outline-bullet-list">
+                              {bullets.map((bullet, i) => <li key={i}>{bullet}</li>)}
+                            </ul>
+                          </div>
+                        ) : null
+                    )}
+                  </div>
                 )}
-              {result.assetsBreakdown.steps && result.assetsBreakdown.steps.length > 0 && (
-                <ol className="asset-checklist">
-                  {result.assetsBreakdown.steps.map((step, i) => (
-                    <li key={i} className="asset-checklist-item">
-                      <div className="asset-checklist-header">
-                        <span className="asset-step-name">{step.stepName}</span>
-                        <span className={`difficulty-badge difficulty-${step.difficulty.toLowerCase()}`}>
-                          {step.difficulty}
-                        </span>
-                      </div>
-                      <p className="asset-step-description">{step.description}</p>
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </>
-          ) : (
-            <div className="error">{result.assetsError || 'Assets breakdown generation failed for an unknown reason.'}</div>
-          )}
+              </div>
+            )}
+
+            {activeResultTab === 'assets' && (
+              <div className="result-tab-panel">
+                <button
+                  className="expand-button"
+                  onClick={handleGenerateAssetsBreakdown}
+                  disabled={assetsLoading}
+                >
+                  {assetsLoading ? 'Generating…' : 'Generate Assets Breakdown'}
+                </button>
+                {assetsLoading && <div className="status">Generating assets breakdown…</div>}
+                {assetsError && <div className="error">{assetsError}</div>}
+
+                {!assetsLoading && !assetsError && contentType && (
+                  <span className={`content-type-badge content-type-${contentType}`}>
+                    {contentType.charAt(0).toUpperCase() + contentType.slice(1)}
+                  </span>
+                )}
+
+                {!assetsLoading && !assetsError && (!assetSteps || assetSteps.length === 0) && assetNote && (
+                  <div className="status">{assetNote}</div>
+                )}
+
+                {!assetsLoading && !assetsError && assetSteps && assetSteps.length > 0 && (
+                  <ol className="asset-checklist">
+                    {assetSteps.map((step, i) => (
+                      <li key={i} className="asset-checklist-item">
+                        <div className="asset-checklist-header">
+                          <span className="asset-step-name">{step.stepName}</span>
+                          <span className={`difficulty-badge difficulty-${step.difficulty.toLowerCase()}`}>
+                            {step.difficulty}
+                          </span>
+                        </div>
+                        <p className="asset-step-description">{step.description}</p>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>
