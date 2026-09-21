@@ -1206,7 +1206,7 @@ app.post('/api/watch-video', async (req, res) => {
     gotLock = await acquireWatchJobLock();
   } catch (err) {
     logRedisError('acquireWatchJobLock (POST /api/watch-video)', err);
-    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
+    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)', details: err.message, stack: err.stack });
   }
 
   if (!gotLock) {
