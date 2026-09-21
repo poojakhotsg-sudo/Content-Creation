@@ -18,7 +18,67 @@ const APIFY_INSTAGRAM_POSTS_ACTOR_ID = 'unseenuser~ig-posts';
 const APIFY_INSTAGRAM_TRANSCRIPT_ACTOR_ID = 'crawlerbros~instagram-transcript-scraper';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const GROQ_MODELS = [
+  GROQ_MODEL,
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b',
+  'groq/compound-mini',
+].filter((m, i, arr) => m && arr.indexOf(m) === i);
+
+async function callGroqWithFallback({ prompt, max_tokens = 1024, response_format }) {
+  if (!GROQ_API_KEY) {
+    const err = new Error('Groq API key is not configured');
+    err.status = 500;
+    throw err;
+  }
+
+  let lastError = null;
+
+  for (const model of GROQ_MODELS) {
+    try {
+      const groqResp = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model,
+          max_tokens,
+          messages: [{ role: 'user', content: prompt }],
+          ...(response_format ? { response_format } : {}),
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            'content-type': 'application/json',
+          },
+          timeout: 60000,
+        }
+      );
+
+      const content = groqResp.data?.choices?.[0]?.message?.content || '';
+      if (content) {
+        return content;
+      }
+    } catch (err) {
+      const errData = err.response?.data || {};
+      const status = err.response?.status;
+      const isRateLimit =
+        status === 429 ||
+        errData.error?.code === 'rate_limit_exceeded' ||
+        errData.error?.type === 'tokens';
+
+      console.warn(`[Groq] Model ${model} failed (${status || err.message}):`, errData.error?.message || err.message);
+
+      lastError = err;
+      if (isRateLimit) {
+        console.log(`[Groq] Rate limit reached on ${model}, falling back to next available model...`);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError;
+}
 
 if (!YOUTUBE_API_KEY) {
   console.warn('WARNING: YOUTUBE_API_KEY is not set in .env');
@@ -808,26 +868,15 @@ Respond with ONLY a JSON object of the form {"hook": string[], "demo": string[],
 
   let raw;
   try {
-    const groqResp = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: GROQ_MODEL,
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          'content-type': 'application/json',
-        },
-        timeout: 60000,
-      }
-    );
-    raw = groqResp.data?.choices?.[0]?.message?.content || '';
+    raw = await callGroqWithFallback({
+      prompt,
+      max_tokens: 1024,
+      response_format: { type: 'json_object' },
+    });
   } catch (err) {
     console.error('generate-outline error:', err.response?.data || err.message);
-    const publicErr = new Error('Failed to generate outline from Groq API');
+    const msg = err.response?.data?.error?.message || err.message || 'Failed to generate outline from Groq API';
+    const publicErr = new Error(`Failed to generate outline: ${msg}`);
     publicErr.status = 502;
     throw publicErr;
   }
@@ -928,26 +977,15 @@ Respond with ONLY a json object of the form:
 
   let raw;
   try {
-    const groqResp = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: GROQ_MODEL,
-        max_tokens: 1536,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          'content-type': 'application/json',
-        },
-        timeout: 60000,
-      }
-    );
-    raw = groqResp.data?.choices?.[0]?.message?.content || '';
+    raw = await callGroqWithFallback({
+      prompt,
+      max_tokens: 1536,
+      response_format: { type: 'json_object' },
+    });
   } catch (err) {
     console.error('generate-assets-breakdown error:', err.response?.data || err.message);
-    const publicErr = new Error('Failed to generate assets breakdown from Groq API');
+    const msg = err.response?.data?.error?.message || err.message || 'Failed to generate assets breakdown from Groq API';
+    const publicErr = new Error(`Failed to generate assets breakdown: ${msg}`);
     publicErr.status = 502;
     throw publicErr;
   }
