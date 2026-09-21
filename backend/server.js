@@ -1243,6 +1243,19 @@ app.get('/api/watch-status/:jobId', async (req, res) => {
   return res.json(job);
 });
 
+// POST /api/clear-watch-lock
+// Force-releases a stale watch-job lock so a new job can be submitted.
+app.post('/api/clear-watch-lock', async (_req, res) => {
+  try {
+    await releaseWatchJobLock();
+    console.log('[clear-watch-lock] Lock released via admin endpoint');
+    return res.json({ cleared: true });
+  } catch (err) {
+    logRedisError('releaseWatchJobLock (POST /api/clear-watch-lock)', err);
+    return res.status(500).json({ error: 'Failed to clear lock (KV connection failed)' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 if (require.main === module) {
   app.listen(PORT, () => {
