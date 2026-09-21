@@ -806,37 +806,73 @@ STRICT RULES — do not violate any of these:
 
 Respond with ONLY a JSON object of the form {"hook": string[], "demo": string[], "conclusion": string[]}. No prose, no markdown, just the JSON object.`;
 
+  // Helper: call Groq, first with json_object mode, fall back to plain text +
+  // regex extraction if the model rejects json_object for this prompt/context.
+  async function callGroq(promptText, maxTokens) {
+    const makeCall = (useJsonMode) =>
+      axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: GROQ_MODEL,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: promptText }],
+          ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            'content-type': 'application/json',
+          },
+          timeout: 60000,
+        }
+      );
+
+    let content;
+    try {
+      const resp = await makeCall(true);
+      content = resp.data?.choices?.[0]?.message?.content || '';
+    } catch (err) {
+      const errMsg = err.response?.data?.error?.message || err.message || '';
+      // Some model/prompt combos reject json_object mode — retry without it.
+      if (/validate json|json/i.test(errMsg)) {
+        console.warn('[groq] json_object mode failed, retrying without it:', errMsg);
+        try {
+          const resp2 = await makeCall(false);
+          content = resp2.data?.choices?.[0]?.message?.content || '';
+        } catch (err2) {
+          console.error('[groq] retry without json_object also failed:', err2.response?.data || err2.message);
+          const publicErr = new Error('Failed to generate content from Groq API');
+          publicErr.status = 502;
+          throw publicErr;
+        }
+      } else {
+        console.error('[groq] call failed:', err.response?.data || err.message);
+        const publicErr = new Error('Failed to generate content from Groq API');
+        publicErr.status = 502;
+        throw publicErr;
+      }
+    }
+
+    // Strip markdown code fences if the model wrapped the JSON
+    const stripped = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    // Extract the first {...} block if there's surrounding prose
+    const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+    return jsonMatch ? jsonMatch[0] : stripped;
+  }
+
   let raw;
   try {
-    const groqResp = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: GROQ_MODEL,
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          'content-type': 'application/json',
-        },
-        timeout: 60000,
-      }
-    );
-    raw = groqResp.data?.choices?.[0]?.message?.content || '';
+    raw = await callGroq(prompt, 1024);
   } catch (err) {
-    console.error('generate-outline error:', err.response?.data || err.message);
-    const publicErr = new Error('Failed to generate outline from Groq API');
-    publicErr.status = 502;
-    throw publicErr;
+    console.error('generate-outline error:', err.message);
+    throw err;
   }
 
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (parseErr) {
-    console.error('generate-outline parse error:', parseErr.message, raw);
+    console.error('generate-outline parse error:', parseErr.message, '\nRaw output:', raw);
     const err = new Error('Groq returned an unparseable outline');
     err.status = 502;
     throw err;
@@ -926,37 +962,70 @@ Respond with ONLY a json object of the form:
 }
 "steps" must be null for Demo or Educational content (use "note" instead). No prose, no markdown, just the json object.`;
 
+  // Helper: call Groq, first with json_object mode, fall back to plain text +
+  // regex extraction if the model rejects json_object for this prompt/context.
+  async function callGroqAssets(promptText, maxTokens) {
+    const makeCall = (useJsonMode) =>
+      axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: GROQ_MODEL,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: promptText }],
+          ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            'content-type': 'application/json',
+          },
+          timeout: 60000,
+        }
+      );
+
+    let content;
+    try {
+      const resp = await makeCall(true);
+      content = resp.data?.choices?.[0]?.message?.content || '';
+    } catch (err) {
+      const errMsg = err.response?.data?.error?.message || err.message || '';
+      if (/validate json|json/i.test(errMsg)) {
+        console.warn('[groq-assets] json_object mode failed, retrying without it:', errMsg);
+        try {
+          const resp2 = await makeCall(false);
+          content = resp2.data?.choices?.[0]?.message?.content || '';
+        } catch (err2) {
+          console.error('[groq-assets] retry without json_object also failed:', err2.response?.data || err2.message);
+          const publicErr = new Error('Failed to generate assets breakdown from Groq API');
+          publicErr.status = 502;
+          throw publicErr;
+        }
+      } else {
+        console.error('[groq-assets] call failed:', err.response?.data || err.message);
+        const publicErr = new Error('Failed to generate assets breakdown from Groq API');
+        publicErr.status = 502;
+        throw publicErr;
+      }
+    }
+
+    const stripped = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+    return jsonMatch ? jsonMatch[0] : stripped;
+  }
+
   let raw;
   try {
-    const groqResp = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: GROQ_MODEL,
-        max_tokens: 1536,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          'content-type': 'application/json',
-        },
-        timeout: 60000,
-      }
-    );
-    raw = groqResp.data?.choices?.[0]?.message?.content || '';
+    raw = await callGroqAssets(prompt, 1536);
   } catch (err) {
-    console.error('generate-assets-breakdown error:', err.response?.data || err.message);
-    const publicErr = new Error('Failed to generate assets breakdown from Groq API');
-    publicErr.status = 502;
-    throw publicErr;
+    console.error('generate-assets-breakdown error:', err.message);
+    throw err;
   }
 
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (parseErr) {
-    console.error('generate-assets-breakdown parse error:', parseErr.message, raw);
+    console.error('generate-assets-breakdown parse error:', parseErr.message, '\nRaw output:', raw);
     const err = new Error('Groq returned an unparseable assets breakdown');
     err.status = 502;
     throw err;
