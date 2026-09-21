@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const { YoutubeTranscript } = require('youtube-transcript');
 
 const app = express();
 app.use(cors());
@@ -702,17 +703,41 @@ app.post('/api/instagram/post-transcript-manual', (req, res) => {
   return res.json({ postUrl, transcript: transcript.trim() });
 });
 
-// Fetches a YouTube video's transcript via the Apify transcript actor.
-// Returns '' when the actor ran fine but produced no transcript (not an
-// error); throws only on a genuine request failure or missing config.
+// Fetches a YouTube video transcript.
+// PRIMARY (fast, ~1-3s): youtube-transcript package — reads YouTube's own
+//   timedtext/caption endpoint directly, no Apify actor spin-up needed.
+// FALLBACK (~30-60s): Apify actor, used only when the direct method fails
+//   (e.g. captions disabled, region-locked, or requires auth).
 async function fetchYoutubeTranscriptText(videoId) {
+  // --- Fast path: youtube-transcript (no Apify, ~1-3s) ---
+  try {
+    console.log(`[yt-transcript] trying fast path for videoId=${videoId}`);
+    const segments = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
+    if (Array.isArray(segments) && segments.length > 0) {
+      const text = segments
+        .map((s) => (s.text || '').replace(/\[.*?\]/g, '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (text) {
+        console.log(`[yt-transcript] fast path OK: ${text.length} chars`);
+        return text;
+      }
+    }
+    console.warn('[yt-transcript] fast path returned empty, falling back to Apify');
+  } catch (fastErr) {
+    console.warn('[yt-transcript] fast path failed, falling back to Apify:', fastErr.message);
+  }
+
+  // --- Fallback: Apify actor (~30-60s) ---
   if (!APIFY_API_TOKEN || APIFY_TRANSCRIPT_ACTOR_ID === 'REPLACE_WITH_ACTOR_ID') {
-    const err = new Error('Transcript fetching is not configured (missing Apify token or actor ID)');
+    const err = new Error('Transcript not available (captions disabled and Apify not configured)');
     err.status = 500;
     throw err;
   }
 
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  console.log(`[yt-transcript] falling back to Apify for videoId=${videoId}`);
 
   try {
     const runResp = await axios.post(
@@ -725,7 +750,7 @@ async function fetchYoutubeTranscriptText(videoId) {
     );
     return extractTranscriptText(runResp.data);
   } catch (err) {
-    console.error('fetchYoutubeTranscriptText error:', err.response?.data || err.message);
+    console.error('[yt-transcript] Apify fallback error:', err.response?.data || err.message);
     const publicErr = new Error('Failed to fetch transcript for this video');
     publicErr.status = 502;
     throw publicErr;
