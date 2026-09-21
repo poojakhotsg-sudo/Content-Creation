@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
-const { YoutubeTranscript } = require('youtube-transcript');
 
 const app = express();
 app.use(cors());
@@ -19,7 +18,7 @@ const APIFY_INSTAGRAM_POSTS_ACTOR_ID = 'unseenuser~ig-posts';
 const APIFY_INSTAGRAM_TRANSCRIPT_ACTOR_ID = 'crawlerbros~instagram-transcript-scraper';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_MODEL = 'llama3-70b-8192';
+const GROQ_MODEL = 'openai/gpt-oss-120b';
 
 if (!YOUTUBE_API_KEY) {
   console.warn('WARNING: YOUTUBE_API_KEY is not set in .env');
@@ -703,41 +702,17 @@ app.post('/api/instagram/post-transcript-manual', (req, res) => {
   return res.json({ postUrl, transcript: transcript.trim() });
 });
 
-// Fetches a YouTube video transcript.
-// PRIMARY (fast, ~1-3s): youtube-transcript package — reads YouTube's own
-//   timedtext/caption endpoint directly, no Apify actor spin-up needed.
-// FALLBACK (~30-60s): Apify actor, used only when the direct method fails
-//   (e.g. captions disabled, region-locked, or requires auth).
+// Fetches a YouTube video's transcript via the Apify transcript actor.
+// Returns '' when the actor ran fine but produced no transcript (not an
+// error); throws only on a genuine request failure or missing config.
 async function fetchYoutubeTranscriptText(videoId) {
-  // --- Fast path: youtube-transcript (no Apify, ~1-3s) ---
-  try {
-    console.log(`[yt-transcript] trying fast path for videoId=${videoId}`);
-    const segments = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
-    if (Array.isArray(segments) && segments.length > 0) {
-      const text = segments
-        .map((s) => (s.text || '').replace(/\[.*?\]/g, '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-      if (text) {
-        console.log(`[yt-transcript] fast path OK: ${text.length} chars`);
-        return text;
-      }
-    }
-    console.warn('[yt-transcript] fast path returned empty, falling back to Apify');
-  } catch (fastErr) {
-    console.warn('[yt-transcript] fast path failed, falling back to Apify:', fastErr.message);
-  }
-
-  // --- Fallback: Apify actor (~30-60s) ---
   if (!APIFY_API_TOKEN || APIFY_TRANSCRIPT_ACTOR_ID === 'REPLACE_WITH_ACTOR_ID') {
-    const err = new Error('Transcript not available (captions disabled and Apify not configured)');
+    const err = new Error('Transcript fetching is not configured (missing Apify token or actor ID)');
     err.status = 500;
     throw err;
   }
 
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  console.log(`[yt-transcript] falling back to Apify for videoId=${videoId}`);
 
   try {
     const runResp = await axios.post(
@@ -750,7 +725,7 @@ async function fetchYoutubeTranscriptText(videoId) {
     );
     return extractTranscriptText(runResp.data);
   } catch (err) {
-    console.error('[yt-transcript] Apify fallback error:', err.response?.data || err.message);
+    console.error('fetchYoutubeTranscriptText error:', err.response?.data || err.message);
     const publicErr = new Error('Failed to fetch transcript for this video');
     publicErr.status = 502;
     throw publicErr;
@@ -1137,10 +1112,71 @@ function parseVideoSource(rawUrl) {
   return null;
 }
 
+async function runWatchVideoJob(jobId, url, businessContext) {
+  try {
+    const source = parseVideoSource(url);
+    if (!source) {
+      const err = new Error('Unsupported URL — paste a YouTube or Instagram video/Reel link.');
+      err.status = 400;
+      throw err;
+    }
+
+    const transcript = source.platform === 'youtube'
+      ? await fetchYoutubeTranscriptText(source.videoId)
+      : await fetchInstagramTranscriptText(source.postUrl, 60000);
+
+    if (!transcript || !transcript.trim()) {
+      throw new Error('Transcript not available for this video');
+    }
+    const trimmedTranscript = transcript.trim();
+
+    // Outline/assets are a bonus on top of the transcript, not a hard
+    // requirement — degrade to null on failure (e.g. Groq misconfigured)
+    // rather than failing the whole job, same leniency the CLI path had.
+    // The failure reason is still surfaced in the result (outlineError /
+    // assetsError) so it's visible to the frontend and diagnosable from the
+    // stored job data, not just a server log line only we can see.
+    let outline = null;
+    let outlineError = null;
+    try {
+      outline = await generateOutlineFromTranscript(trimmedTranscript, businessContext);
+    } catch (err) {
+      console.error('watch-video outline generation failed:', err.message);
+      outlineError = err.message || 'Outline generation failed';
+    }
+
+    let assetsBreakdown = null;
+    let assetsError = null;
+    try {
+      assetsBreakdown = await generateAssetsBreakdownFromTranscript(trimmedTranscript);
+    } catch (err) {
+      console.error('watch-video assets breakdown generation failed:', err.message);
+      assetsError = err.message || 'Assets breakdown generation failed';
+    }
+
+    await setWatchJob(jobId, {
+      status: 'done',
+      result: { transcript: trimmedTranscript, outline, outlineError, assetsBreakdown, assetsError },
+      finishedAt: Date.now(),
+    });
+  } catch (err) {
+    console.error('watch-video job error:', err.message);
+    try {
+      await setWatchJob(jobId, { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() });
+    } catch (writeErr) {
+      logRedisError('setWatchJob failure write (runWatchVideoJob)', writeErr);
+    }
+  } finally {
+    try {
+      await releaseWatchJobLock();
+    } catch (lockErr) {
+      logRedisError('releaseWatchJobLock (runWatchVideoJob)', lockErr);
+    }
+  }
+}
+
 // POST /api/watch-video { url, businessContext? }
-// Works in Vercel serverless: does all work synchronously within the request
-// so the function is not terminated before Groq calls complete. Saves progress
-// to Redis at each stage so polling reflects real state.
+// Starts a background /watch skill run and returns immediately with a jobId.
 app.post('/api/watch-video', async (req, res) => {
   const { url, businessContext } = req.body || {};
 
@@ -1162,102 +1198,20 @@ app.post('/api/watch-video', async (req, res) => {
 
   const jobId = crypto.randomUUID();
   try {
-    await setWatchJob(jobId, { status: 'processing', stage: 'transcript' });
+    await setWatchJob(jobId, { status: 'processing' });
   } catch (err) {
     logRedisError('setWatchJob initial write (POST /api/watch-video)', err);
     await releaseWatchJobLock();
     return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
   }
 
-  // Send the jobId immediately so the frontend can start polling.
-  // We then do all the heavy work synchronously in this same request
-  // handler — Vercel keeps the function alive until res.end() is called,
-  // so the transcript fetch + Groq calls all complete before the function
-  // is terminated. The frontend polls /api/watch-status while we work.
-  res.json({ jobId });
+  // Fire and forget — runWatchVideoJob handles its own errors internally.
+  runWatchVideoJob(jobId, url.trim(), businessContext);
 
-  // --- Everything below runs after the HTTP response has been sent ---
-  // On Vercel, the runtime keeps the event loop alive until the response
-  // stream is fully flushed, so awaited async work here still completes.
-  try {
-    const source = parseVideoSource(url.trim());
-    if (!source) {
-      throw Object.assign(new Error('Unsupported URL — paste a YouTube or Instagram video/Reel link.'), { status: 400 });
-    }
-
-    // Stage 1: fetch transcript
-    const transcript = source.platform === 'youtube'
-      ? await fetchYoutubeTranscriptText(source.videoId)
-      : await fetchInstagramTranscriptText(source.postUrl, 60000);
-
-    if (!transcript || !transcript.trim()) {
-      throw new Error('Transcript not available for this video');
-    }
-    const trimmedTranscript = transcript.trim();
-
-    // Save transcript immediately so the frontend can show it even if
-    // Groq calls later fail or time out.
-    await setWatchJob(jobId, {
-      status: 'generating',
-      stage: 'outline',
-      result: { transcript: trimmedTranscript },
-    });
-
-    // Stage 2: generate outline via Groq
-    let outline = null;
-    let outlineError = null;
-    try {
-      outline = await generateOutlineFromTranscript(trimmedTranscript, businessContext);
-      console.log('[watch-video] outline generated successfully');
-    } catch (err) {
-      console.error('[watch-video] outline generation failed:', err.message);
-      outlineError = err.message || 'Outline generation failed';
-    }
-
-    // Update Redis with outline result so far
-    await setWatchJob(jobId, {
-      status: 'generating',
-      stage: 'assets',
-      result: { transcript: trimmedTranscript, outline, outlineError },
-    });
-
-    // Stage 3: generate assets breakdown via Groq
-    let assetsBreakdown = null;
-    let assetsError = null;
-    try {
-      assetsBreakdown = await generateAssetsBreakdownFromTranscript(trimmedTranscript);
-      console.log('[watch-video] assets breakdown generated successfully');
-    } catch (err) {
-      console.error('[watch-video] assets breakdown generation failed:', err.message);
-      assetsError = err.message || 'Assets breakdown generation failed';
-    }
-
-    // Stage 4: all done
-    await setWatchJob(jobId, {
-      status: 'done',
-      result: { transcript: trimmedTranscript, outline, outlineError, assetsBreakdown, assetsError },
-      finishedAt: Date.now(),
-    });
-    console.log('[watch-video] job', jobId, 'completed successfully');
-  } catch (err) {
-    console.error('[watch-video] job error:', err.message);
-    try {
-      await setWatchJob(jobId, { status: 'failed', error: err.message || 'Watch job failed', finishedAt: Date.now() });
-    } catch (writeErr) {
-      logRedisError('setWatchJob failure write (watch-video POST)', writeErr);
-    }
-  } finally {
-    try {
-      await releaseWatchJobLock();
-    } catch (lockErr) {
-      logRedisError('releaseWatchJobLock (watch-video POST)', lockErr);
-    }
-  }
+  return res.json({ jobId });
 });
 
 // GET /api/watch-status/:jobId
-// Returns the current job state from Redis. The frontend polls this every few
-// seconds. Statuses: processing | generating | done | failed
 app.get('/api/watch-status/:jobId', async (req, res) => {
   let job;
   try {
