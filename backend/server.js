@@ -1212,6 +1212,25 @@ app.post('/api/watch-video', async (req, res) => {
   return res.json({ jobId });
 });
 
+// GET /api/kv-health — diagnostic endpoint (safe: values never logged, only presence/length)
+app.get('/api/kv-health', async (req, res) => {
+  const url = cleanEnvValue(process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL);
+  const token = cleanEnvValue(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN);
+  const info = {
+    url_present: !!url,
+    url_starts_with_https: url ? url.startsWith('https://') : false,
+    url_prefix: url ? url.slice(0, 30) + '...' : null,
+    token_present: !!token,
+    token_length: token ? token.length : 0,
+  };
+  try {
+    await redis.ping();
+    return res.json({ ok: true, ...info });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message, ...info });
+  }
+});
+
 // GET /api/watch-status/:jobId
 app.get('/api/watch-status/:jobId', async (req, res) => {
   let job;
