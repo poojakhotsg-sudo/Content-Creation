@@ -1,21 +1,21 @@
 import React, { useEffect, useRef, useState } from 'react';
 
-// Standalone "Watch Backup" page — paste a URL, run the /watch skill in the
-// background, poll for the result. Separate from the Instagram/YouTube tabs;
-// does not touch their UI or state.
+// Standalone "Watch Backup" page — paste a URL, analyze it in the background,
+// poll for the result. Separate from the Instagram/YouTube tabs.
 export default function WatchVideo() {
   const [url, setUrl] = useState('');
   const [businessContext, setBusinessContext] = useState(
     () => localStorage.getItem('businessContext') || ''
   );
-  const [status, setStatus] = useState('idle'); // idle | processing | done | failed
+  // idle | processing | generating | done | failed
+  const [status, setStatus] = useState('idle');
+  // transcript | outline | assets  (sub-step while working)
+  const [stage, setStage] = useState('');
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const pollRef = useRef(null);
   const pollAttemptsRef = useRef(0);
 
-  // Safety net: matches the backend's 5-minute job timeout plus a buffer,
-  // so a stuck job can't leave the UI polling forever.
   const POLL_INTERVAL_MS = 4000;
   const MAX_POLL_ATTEMPTS = Math.ceil((6 * 60 * 1000) / POLL_INTERVAL_MS);
 
@@ -25,6 +25,13 @@ export default function WatchVideo() {
 
   function handleBusinessContextBlur() {
     localStorage.setItem('businessContext', businessContext);
+  }
+
+  function stageLabel(s) {
+    if (s === 'transcript') return 'Fetching transcript…';
+    if (s === 'outline')    return 'Transcript ready — generating video outline…';
+    if (s === 'assets')     return 'Outline ready — generating assets breakdown…';
+    return 'Analyzing video… this can take a minute or two.';
   }
 
   async function pollStatus(jobId) {
@@ -53,8 +60,16 @@ export default function WatchVideo() {
         pollRef.current = null;
         setStatus('failed');
         setError(data.error || 'Watch job failed');
+      } else if (data.status === 'generating') {
+        // Show partial transcript immediately as it arrives
+        setStatus('generating');
+        setStage(data.stage || '');
+        if (data.result) setResult(data.result);
+      } else {
+        // 'processing' — transcript fetch still in progress
+        setStatus('processing');
+        setStage(data.stage || 'transcript');
       }
-      // else still processing — keep polling
     } catch (err) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -64,8 +79,9 @@ export default function WatchVideo() {
   }
 
   async function handleSubmit() {
-    if (!url.trim() || status === 'processing') return;
+    if (!url.trim() || status === 'processing' || status === 'generating') return;
     setStatus('processing');
+    setStage('transcript');
     setResult(null);
     setError('');
     pollAttemptsRef.current = 0;
@@ -86,12 +102,14 @@ export default function WatchVideo() {
     }
   }
 
+  const isWorking = status === 'processing' || status === 'generating';
+
   return (
     <div className="video-detail">
       <h3 className="section-label">Video URL</h3>
       <p className="reference-note">
-        Paste a YouTube or Instagram video URL. This runs the <code>/watch</code> skill
-        in the background — it can take a minute or two.
+        Paste a YouTube or Instagram video URL. The transcript is fetched first,
+        then the outline and assets breakdown are generated automatically.
       </p>
       <input
         className="business-context-input"
@@ -99,14 +117,14 @@ export default function WatchVideo() {
         placeholder="https://…"
         value={url}
         onChange={(e) => setUrl(e.target.value)}
-        disabled={status === 'processing'}
+        disabled={isWorking}
       />
 
       <h3 className="section-label">Your Business Context</h3>
       <textarea
         className="business-context-input"
         rows={3}
-        placeholder="e.g. We’re an AI automation agency that builds custom workflows for small businesses"
+        placeholder="e.g. We're an AI automation agency that builds custom workflows for small businesses"
         value={businessContext}
         onChange={(e) => setBusinessContext(e.target.value)}
         onBlur={handleBusinessContextBlur}
@@ -115,26 +133,44 @@ export default function WatchVideo() {
       <button
         className="expand-button generate-both-button"
         onClick={handleSubmit}
-        disabled={!url.trim() || status === 'processing'}
+        disabled={!url.trim() || isWorking}
       >
-        {status === 'processing' ? 'Processing…' : 'Analyze Video'}
+        {isWorking ? 'Processing…' : 'Analyze Video'}
       </button>
 
-      {status === 'processing' && (
+      {/* Live stage progress */}
+      {isWorking && (
         <div className="status status-loading">
           <span className="spinner" aria-hidden="true" />
-          Analyzing video… this can take a minute or two.
+          {stageLabel(stage)}
         </div>
       )}
+
       {status === 'failed' && <div className="error">{error}</div>}
 
-      {status === 'done' && result && (
+      {/* Transcript — show as soon as it arrives (even while outline/assets still generating) */}
+      {(status === 'done' || status === 'generating') && result?.transcript && (
         <>
           <h3 className="section-label">Transcript</h3>
           <div className="transcript-box expanded">
             <p className="transcript-text">{result.transcript}</p>
           </div>
+        </>
+      )}
 
+      {/* Second spinner shown below the transcript while Groq calls are in flight */}
+      {status === 'generating' && result?.transcript && (
+        <div className="status status-loading" style={{ marginTop: '1rem' }}>
+          <span className="spinner" aria-hidden="true" />
+          {stage === 'outline'
+            ? 'Generating video outline…'
+            : 'Generating assets breakdown…'}
+        </div>
+      )}
+
+      {/* Video Outline + Required Assets — shown only once fully done */}
+      {status === 'done' && result && (
+        <>
           <h3 className="section-label">Video Outline</h3>
           {result.outline ? (
             <div className="outline-sections">
@@ -156,7 +192,9 @@ export default function WatchVideo() {
               )}
             </div>
           ) : (
-            <div className="error">{result.outlineError || 'Outline generation failed for an unknown reason.'}</div>
+            <div className="error">
+              {result.outlineError || 'Outline generation failed for an unknown reason.'}
+            </div>
           )}
 
           <h3 className="section-label">Required Assets</h3>
@@ -180,7 +218,9 @@ export default function WatchVideo() {
                     <li key={i} className="asset-checklist-item">
                       <div className="asset-checklist-header">
                         <span className="asset-step-name">{step.stepName}</span>
-                        <span className={`difficulty-badge difficulty-${step.difficulty.toLowerCase()}`}>
+                        <span
+                          className={`difficulty-badge difficulty-${step.difficulty.toLowerCase()}`}
+                        >
                           {step.difficulty}
                         </span>
                       </div>
@@ -191,7 +231,9 @@ export default function WatchVideo() {
               )}
             </>
           ) : (
-            <div className="error">{result.assetsError || 'Assets breakdown generation failed for an unknown reason.'}</div>
+            <div className="error">
+              {result.assetsError || 'Assets breakdown generation failed for an unknown reason.'}
+            </div>
           )}
         </>
       )}
