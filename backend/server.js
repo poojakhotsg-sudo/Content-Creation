@@ -18,56 +18,7 @@ const APIFY_INSTAGRAM_POSTS_ACTOR_ID = 'unseenuser~ig-posts';
 const APIFY_INSTAGRAM_TRANSCRIPT_ACTOR_ID = 'crawlerbros~instagram-transcript-scraper';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// Ordered fallback list: if the first model is overloaded / errors, try the next.
-const GROQ_MODELS = [
-  'llama-3.3-70b-versatile',
-  'qwen/qwen3.8-27b',
-  'groq/compound-mini',
-];
-
-/**
- * Call the Groq chat-completions API with automatic retry + model fallback.
- * Tries each model in GROQ_MODELS; for each model retries up to `retries`
- * times with exponential back-off before moving on to the next model.
- */
-async function callGroq(messages, { maxTokens = 1024, retries = 2 } = {}) {
-  let lastErr;
-  for (const model of GROQ_MODELS) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const resp = await axios.post(
-          'https://api.groq.com/openai/v1/chat/completions',
-          {
-            model,
-            max_tokens: maxTokens,
-            messages,
-            response_format: { type: 'json_object' },
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${GROQ_API_KEY}`,
-              'content-type': 'application/json',
-            },
-            timeout: 60000,
-          }
-        );
-        const raw = resp.data?.choices?.[0]?.message?.content
-          || resp.data?.choices?.[0]?.message?.reasoning
-          || '';
-        if (!raw) throw new Error('Groq returned empty content');
-        console.log(`[groq] success with model=${model} attempt=${attempt}`);
-        return raw;
-      } catch (err) {
-        lastErr = err;
-        console.warn(`[groq] model=${model} attempt=${attempt} failed:`, err.response?.data?.error?.message || err.message);
-        if (attempt < retries) {
-          await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
-        }
-      }
-    }
-  }
-  throw lastErr;
-}
+const GROQ_MODEL = 'openai/gpt-oss-120b';
 
 if (!YOUTUBE_API_KEY) {
   console.warn('WARNING: YOUTUBE_API_KEY is not set in .env');
@@ -857,7 +808,23 @@ Respond with ONLY a JSON object of the form {"hook": string[], "demo": string[],
 
   let raw;
   try {
-    raw = await callGroq([{ role: 'user', content: prompt }], { maxTokens: 1024 });
+    const groqResp = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: GROQ_MODEL,
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          'content-type': 'application/json',
+        },
+        timeout: 60000,
+      }
+    );
+    raw = groqResp.data?.choices?.[0]?.message?.content || '';
   } catch (err) {
     console.error('generate-outline error:', err.response?.data || err.message);
     const publicErr = new Error('Failed to generate outline from Groq API');
@@ -961,7 +928,23 @@ Respond with ONLY a json object of the form:
 
   let raw;
   try {
-    raw = await callGroq([{ role: 'user', content: prompt }], { maxTokens: 1536 });
+    const groqResp = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: GROQ_MODEL,
+        max_tokens: 1536,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          'content-type': 'application/json',
+        },
+        timeout: 60000,
+      }
+    );
+    raw = groqResp.data?.choices?.[0]?.message?.content || '';
   } catch (err) {
     console.error('generate-assets-breakdown error:', err.response?.data || err.message);
     const publicErr = new Error('Failed to generate assets breakdown from Groq API');
@@ -1206,7 +1189,7 @@ app.post('/api/watch-video', async (req, res) => {
     gotLock = await acquireWatchJobLock();
   } catch (err) {
     logRedisError('acquireWatchJobLock (POST /api/watch-video)', err);
-    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)', details: err.message, stack: err.stack });
+    return res.status(500).json({ error: 'Job storage is unavailable (KV connection failed)' });
   }
 
   if (!gotLock) {
@@ -1241,19 +1224,6 @@ app.get('/api/watch-status/:jobId', async (req, res) => {
     return res.status(404).json({ error: 'Job not found' });
   }
   return res.json(job);
-});
-
-// POST /api/clear-watch-lock
-// Force-releases a stale watch-job lock so a new job can be submitted.
-app.post('/api/clear-watch-lock', async (_req, res) => {
-  try {
-    await releaseWatchJobLock();
-    console.log('[clear-watch-lock] Lock released via admin endpoint');
-    return res.json({ cleared: true });
-  } catch (err) {
-    logRedisError('releaseWatchJobLock (POST /api/clear-watch-lock)', err);
-    return res.status(500).json({ error: 'Failed to clear lock (KV connection failed)' });
-  }
 });
 
 const PORT = process.env.PORT || 5000;

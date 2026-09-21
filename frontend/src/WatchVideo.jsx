@@ -126,29 +126,7 @@ export default function WatchVideo() {
           Analyzing video… this can take a minute or two.
         </div>
       )}
-      {status === 'failed' && (
-        <div className="error">
-          {error}
-          {error.includes('already running') && (
-            <button
-              className="expand-button"
-              style={{ marginLeft: 12, fontSize: '0.85em' }}
-              onClick={async () => {
-                try {
-                  const r = await fetch('/api/clear-watch-lock', { method: 'POST' });
-                  if (!r.ok) throw new Error('Failed to clear lock');
-                  setStatus('idle');
-                  setError('');
-                } catch (e) {
-                  setError(e.message);
-                }
-              }}
-            >
-              Clear Lock &amp; Retry
-            </button>
-          )}
-        </div>
-      )}
+      {status === 'failed' && <div className="error">{error}</div>}
 
       {status === 'done' && result && (
         <>
