@@ -775,18 +775,25 @@ async function fetchYoutubeTranscriptText(videoId) {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   try {
+    // run-sync-get-dataset-items blocks until the actor run finishes. Videos
+    // without pre-existing captions fall back to audio download + transcription,
+    // which routinely runs past 60s — 150s gives that fallback room to finish.
     const runResp = await axios.post(
       `https://api.apify.com/v2/acts/${APIFY_TRANSCRIPT_ACTOR_ID}/run-sync-get-dataset-items`,
       { targetLanguage: 'en', videoUrl },
       {
         params: { token: APIFY_API_TOKEN },
-        timeout: 60000,
+        timeout: 150000,
       }
     );
     return extractTranscriptText(runResp.data);
   } catch (err) {
     console.error('fetchYoutubeTranscriptText error:', err.response?.data || err.message);
-    const publicErr = new Error('Failed to fetch transcript for this video');
+    const publicErr = new Error(
+      err.code === 'ECONNABORTED'
+        ? 'This video is taking longer than expected to process — try again or use a shorter video'
+        : 'Failed to fetch transcript for this video'
+    );
     publicErr.status = 502;
     throw publicErr;
   }
