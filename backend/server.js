@@ -545,7 +545,7 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
         strict_author_match: true,
         trim: false
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: 180000 }
+      { params: { token: APIFY_API_TOKEN }, timeout: 300000 }
     );
 
     const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
