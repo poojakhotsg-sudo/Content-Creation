@@ -765,18 +765,42 @@ app.post('/api/instagram/post-transcript-manual', (req, res) => {
 // Fetches a YouTube video's transcript via the Apify transcript actor.
 // Returns '' when the actor ran fine but produced no transcript (not an
 // error); throws only on a genuine request failure or missing config.
-async function fetchYoutubeTranscriptText(videoId) {
+// Retries transient network/5xx failures with exponential backoff, since
+// the underlying actor occasionally times out or hiccups mid-run.
+async function fetchYoutubeTranscriptText(videoId, retriesLeft = 2) {
+  if (!APIFY_API_TOKEN) {
+    const err = new Error('Transcript fetching is not configured (missing Apify token)');
+    err.status = 500;
+    throw err;
+  }
+
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
   try {
-    const { YoutubeTranscript } = require('youtube-transcript');
-    const transcriptArray = await YoutubeTranscript.fetchTranscript(videoId);
-    return transcriptArray.map(item => item.text).join(' ');
-  } catch (err) {
-    console.error('fetchYoutubeTranscriptText error:', err.message);
-    const publicErr = new Error(
-      err.message.includes('Too many requests') || err.message.includes('takes too long')
-        ? 'This video is taking longer than expected to process - try again or use a shorter video'
-        : 'Failed to fetch transcript for this video'
+    const runResp = await axios.post(
+      `https://api.apify.com/v2/actors/${APIFY_TRANSCRIPT_ACTOR_ID}/run-sync-get-dataset-items`,
+      { videoUrl },
+      { params: { token: APIFY_API_TOKEN }, timeout: 60000 }
     );
+
+    return extractTranscriptText(runResp.data);
+  } catch (err) {
+    const apifyStatus = err.response?.status;
+    const apifyBody = err.response?.data;
+    const isTransient = !apifyStatus || apifyStatus >= 500 || err.code === 'ECONNABORTED';
+
+    if (isTransient && retriesLeft > 0) {
+      const delayMs = 1000 * 2 ** (2 - retriesLeft);
+      console.warn(`[youtube-transcript] transient error, retrying in ${delayMs}ms (${retriesLeft} left):`, err.message);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      return fetchYoutubeTranscriptText(videoId, retriesLeft - 1);
+    }
+
+    console.error('[youtube-transcript] Apify error status:', apifyStatus);
+    console.error('[youtube-transcript] Apify error body:', apifyBody ? JSON.stringify(apifyBody).slice(0, 800) : 'none');
+    console.error('[youtube-transcript] axios message:', err.message);
+    const detail = apifyBody?.error?.message || apifyBody?.message || err.message || 'Unknown error';
+    const publicErr = new Error(`Failed to fetch transcript for this video: ${detail}`);
     publicErr.status = 502;
     throw publicErr;
   }
