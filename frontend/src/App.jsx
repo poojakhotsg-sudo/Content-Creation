@@ -127,7 +127,6 @@ const INSTAGRAM_CONFIG = {
       noTranscriptHint="Go back and pick a different post to try again."
       skipTranscript={!post.isVideo}
       skipMessage="This is a photo post — no transcript available. Use the caption above as reference."
-      enableWatchFallback={post.isVideo}
     />
   ),
 };

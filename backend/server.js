@@ -545,7 +545,7 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
         strict_author_match: true,
         trim: false
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: 300000 }
+      { params: { token: APIFY_API_TOKEN }, timeout: 180000 }
     );
 
     const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
@@ -591,10 +591,8 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
 
 // Fetches an Instagram video/Reel transcript via the Apify transcript actor.
 // Returns '' when the actor ran fine but produced no transcript; throws only
-// on a genuine request failure or missing config. `timeoutMs` is caller-tunable:
-// the primary route keeps a short fail-fast timeout (see comment below), while
-// the watch-video job (which has no further fallback after this) uses a longer one.
-async function fetchInstagramTranscriptText(postUrl, timeoutMs = 18000) {
+// on a genuine request failure or missing config.
+async function fetchInstagramTranscriptText(postUrl, timeoutMs = 180000) {
   if (!APIFY_API_TOKEN) {
     const err = new Error('Transcript fetching is not configured (missing Apify token)');
     err.status = 500;
@@ -652,19 +650,19 @@ app.post('/api/instagram/post-transcript', async (req, res) => {
   }
 
   try {
-    // Kept short (was 300000ms) so a stuck Apify run fails fast and the
-    // frontend can fall back to /api/watch-video instead of hanging.
-    const transcript = await fetchInstagramTranscriptText(postUrl, 18000);
+    const transcript = await fetchInstagramTranscriptText(postUrl, 180000);
 
     if (!transcript) {
       return res.status(404).json({
-        error: 'Transcript not available for this post (it may be a static image, not a video/Reel)',
+        error: 'Transcript not available for this post — it may not have spoken audio, or the request timed out. Try a different post.',
       });
     }
 
     return res.json({ postUrl, transcript });
   } catch (err) {
-    return res.status(err.status || 502).json({ error: err.message });
+    return res.status(err.status || 502).json({
+      error: 'Transcript not available for this post — it may not have spoken audio, or the request timed out. Try a different post.',
+    });
   }
 });
 
