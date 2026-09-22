@@ -387,7 +387,7 @@ app.post('/api/instagram/search', async (req, res) => {
         enhanceUserSearchWithFacebookPage: false,
         liveSearch: false
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: 60000 }
+      { params: { token: APIFY_API_TOKEN }, timeout: 0 }
     );
 
     const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
@@ -433,7 +433,7 @@ app.post('/api/instagram/search-reels', async (req, res) => {
         hashtags: [hashtag],
         resultsLimit: 30,
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: 120000 }
+      { params: { token: APIFY_API_TOKEN }, timeout: 0 }
     );
 
     const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
@@ -545,7 +545,7 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
         strict_author_match: true,
         trim: false
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: 180000 }
+      { params: { token: APIFY_API_TOKEN }, timeout: 0 }
     );
 
     const rawItems = Array.isArray(runResp.data) ? runResp.data : [];
@@ -592,7 +592,7 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
 // Fetches an Instagram video/Reel transcript via the Apify transcript actor.
 // Returns '' when the actor ran fine but produced no transcript; throws only
 // on a genuine request failure or missing config.
-async function fetchInstagramTranscriptText(postUrl, timeoutMs = 180000) {
+async function fetchInstagramTranscriptText(postUrl) {
   if (!APIFY_API_TOKEN) {
     const err = new Error('Transcript fetching is not configured (missing Apify token)');
     err.status = 500;
@@ -608,7 +608,7 @@ async function fetchInstagramTranscriptText(postUrl, timeoutMs = 180000) {
         videoUrls: [postUrl],
         whisperModel: 'base',
       },
-      { params: { token: APIFY_API_TOKEN }, timeout: timeoutMs }
+      { params: { token: APIFY_API_TOKEN }, timeout: 0 }
     );
 
     const rawData = runResp.data;
@@ -650,7 +650,7 @@ app.post('/api/instagram/post-transcript', async (req, res) => {
   }
 
   try {
-    const transcript = await fetchInstagramTranscriptText(postUrl, 180000);
+    const transcript = await fetchInstagramTranscriptText(postUrl);
 
     if (!transcript) {
       return res.status(404).json({
@@ -784,7 +784,7 @@ async function fetchYoutubeTranscriptText(videoId, retriesLeft = 2) {
     const runResp = await axios.post(
       `https://api.apify.com/v2/actors/${APIFY_TRANSCRIPT_ACTOR_ID}/run-sync-get-dataset-items`,
       { videoUrl },
-      { params: { token: APIFY_API_TOKEN }, timeout: 60000 }
+      { params: { token: APIFY_API_TOKEN }, timeout: 0 }
     );
 
     return extractTranscriptText(runResp.data);
@@ -1179,7 +1179,7 @@ async function runWatchVideoJob(jobId, url, businessContext) {
 
     const transcript = source.platform === 'youtube'
       ? await fetchYoutubeTranscriptText(source.videoId)
-      : await fetchInstagramTranscriptText(source.postUrl, 60000);
+      : await fetchInstagramTranscriptText(source.postUrl);
 
     if (!transcript || !transcript.trim()) {
       throw new Error('Transcript not available for this video');
