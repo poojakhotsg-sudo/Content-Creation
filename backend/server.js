@@ -541,6 +541,7 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
         enrich_reel_transcripts: false,
         profiles: [cleanUsername],
         results_type: 'both',
+        resultsLimit: 100,
         strict_author_match: true,
         trim: false
       },
@@ -578,6 +579,11 @@ app.post('/api/instagram/recent-posts', async (req, res) => {
     console.error('[instagram/recent-posts] Apify error status:', apifyStatus);
     console.error('[instagram/recent-posts] Apify error body:', JSON.stringify(apifyBody).slice(0, 800));
     console.error('[instagram/recent-posts] axios message:', err.message);
+    if (err.code === 'ECONNABORTED') {
+      return res.status(504).json({
+        error: "Fetching this creator's posts is taking longer than expected. Try again in a moment, or try a shorter timeframe."
+      });
+    }
     const detail = apifyBody?.error?.message || apifyBody?.message || err.message || 'Unknown error';
     return res.status(502).json({ error: `Failed to fetch recent posts from Instagram: ${detail}` });
   }
