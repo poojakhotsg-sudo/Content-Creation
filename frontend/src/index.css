@@ -686,6 +686,42 @@ h1 {
   border-color: transparent;
 }
 
+.content-type-entertainment {
+  background: #fef3c7;
+  color: #b45309;
+  border-color: transparent;
+}
+
+.content-type-motivational {
+  background: #fce7f3;
+  color: #be185d;
+  border-color: transparent;
+}
+
+.content-type-vlog {
+  background: #d1fae5;
+  color: #065f46;
+  border-color: transparent;
+}
+
+.content-type-news {
+  background: #e0f2fe;
+  color: #0369a1;
+  border-color: transparent;
+}
+
+.content-type-interview {
+  background: #f0fdf4;
+  color: #15803d;
+  border-color: transparent;
+}
+
+.content-type-other {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: transparent;
+}
+
 /* â”€â”€â”€ Difficulty badges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .difficulty-badge {
   flex-shrink: 0;

@@ -32,6 +32,7 @@ export default function TranscriptDetail({
   const [assetsLoading, setAssetsLoading] = useState(false);
   const [assetsError, setAssetsError] = useState('');
   const [contentType, setContentType] = useState(null);
+  const [assetCategory, setAssetCategory] = useState(null);
   const [assetNote, setAssetNote] = useState(null);
 
   // 'outline' | 'assets'
@@ -69,6 +70,7 @@ export default function TranscriptDetail({
     setAssetsError('');
     setAssetSteps(null);
     setContentType(null);
+    setAssetCategory(null);
     setAssetNote(null);
     setActiveResultTab('assets');
     try {
@@ -81,6 +83,7 @@ export default function TranscriptDetail({
       if (!resp.ok) throw new Error(data.error || 'Failed to generate assets breakdown');
       setAssetSteps(data.steps || null);
       setContentType(data.contentType || null);
+      setAssetCategory(data.category || null);
       setAssetNote(data.note || null);
     } catch (err) {
       setAssetsError(err.message || 'Failed to generate assets breakdown');
@@ -287,7 +290,7 @@ export default function TranscriptDetail({
 
                     {!assetsLoading && !assetsError && contentType && (
                       <span className={`content-type-badge content-type-${contentType}`}>
-                        {contentType.charAt(0).toUpperCase() + contentType.slice(1)}
+                        {assetCategory || (contentType.charAt(0).toUpperCase() + contentType.slice(1))}
                       </span>
                     )}
 

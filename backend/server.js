@@ -973,7 +973,19 @@ STEP 1 — Classify what this content actually is. Ask yourself: could a viewer 
 
 Whether the process involves writing code is NOT what decides the category — only whether a concrete, followable process exists at all.
 
-STEP 2 — Generate the assets breakdown based on that classification:
+STEP 2 — Also classify the content's actual category. This is independent of Step 1 and describes what kind of content it IS, not whether it's actionable. Pick the category that best fits, or a similar one:
+
+- Tutorial / How-To
+- Demo / Product Showcase
+- Entertainment / Comedy
+- Vlog / Commentary
+- News / Commentary
+- Interview / Podcast
+- Educational (only when the content genuinely explains a concept, strategy, or idea — never as a default/catch-all for content that doesn't fit elsewhere)
+
+Never label something "Educational" just because it lacks a replicable process. Cartoons, sketches, comedic scripts, vlogs, interviews, and commentary are NOT Educational — classify them by what they actually are.
+
+STEP 3 — Generate the assets breakdown based on the Step 1 classification:
 
 - Tutorial/Walkthrough involving custom code, direct API calls, or custom logic: give a step-by-step BUILD breakdown. Each step: stepName (short), description (1 sentence), difficulty (Easy/Medium/Hard).
 
@@ -981,17 +993,19 @@ STEP 2 — Generate the assets breakdown based on that classification:
 
 - Demo: no steps. State plainly that this demonstrates a tool's capability rather than teaching a process, and name the specific tool/service being shown.
 
-- Educational: no steps. State plainly that no buildable tool or process was identified in this content.
+- Educational or any other non-actionable category (Entertainment, Vlog, Interview, News, etc.): no steps. Explain in "note" why there are no actionable steps — e.g. what the transcript actually consists of (dialogue, jokes, a scripted storyline, opinion/commentary, etc.) and that it contains no tutorial, educational explanation, or step-by-step process that can be replicated.
 
 Hard rule for all cases: only include steps, tools, or claims that are actually shown or described in the transcript. Never invent a step, tool, or process that isn't supported by the content — including for well-known tools where you might otherwise guess a typical setup. If you're not sure whether something counts as a real step or just color/commentary, leave it out.
 
 Respond with ONLY a json object of the form:
 {
-  "contentType": "demo" | "tutorial" | "walkthrough" | "educational",
+  "contentType": "demo" | "tutorial" | "walkthrough" | "educational" | "entertainment" | "motivational" | "vlog" | "news" | "interview" | "other",
+  "category": string,
   "steps": [{"stepName": string, "description": string, "difficulty": "Easy" | "Medium" | "Hard"}] | null,
   "note": string | null
 }
-"steps" must be null for Demo or Educational content (use "note" instead). No prose, no markdown, just the json object.`;
+Choose "contentType" to match the Step 1 classification: use "tutorial" or "walkthrough" for replicable processes, "demo" for capability showcases, "educational" ONLY for genuine concept/strategy explanations, and "entertainment", "motivational", "vlog", "news", "interview", or "other" for all other non-actionable content types.
+"category" must always be filled with the specific content category from Step 2 (e.g. "Entertainment / Comedy", "Vlog / Commentary", "Motivational / Self-Help"), never left generic or defaulted to "Educational". "steps" must be null for Demo or any non-actionable contentType (use "note" instead). No prose, no markdown, just the json object.`;
 
   let raw;
   try {
@@ -1018,7 +1032,7 @@ Respond with ONLY a json object of the form:
     throw err;
   }
 
-  const validContentTypes = ['demo', 'tutorial', 'walkthrough', 'educational'];
+  const validContentTypes = ['demo', 'tutorial', 'walkthrough', 'educational', 'entertainment', 'motivational', 'vlog', 'news', 'interview', 'other'];
   const contentType = validContentTypes.includes(parsed?.contentType) ? parsed.contentType : null;
 
   const steps = Array.isArray(parsed?.steps)
@@ -1032,8 +1046,11 @@ Respond with ONLY a json object of the form:
         .filter((s) => s.stepName)
     : null;
 
+  const category = parsed?.category ? String(parsed.category).trim() : null;
+
   return {
     contentType,
+    category,
     steps: steps && steps.length > 0 ? steps : null,
     note: parsed?.note ? String(parsed.note).trim() : null,
   };

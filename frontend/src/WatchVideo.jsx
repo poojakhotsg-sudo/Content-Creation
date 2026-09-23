@@ -29,6 +29,7 @@ export default function WatchVideo() {
   const [assetsLoading, setAssetsLoading] = useState(false);
   const [assetsError, setAssetsError] = useState('');
   const [contentType, setContentType] = useState(null);
+  const [assetCategory, setAssetCategory] = useState(null);
   const [assetNote, setAssetNote] = useState(null);
 
   // Active result tab
@@ -92,6 +93,7 @@ export default function WatchVideo() {
     setAssetSteps(null);
     setAssetsError('');
     setContentType(null);
+    setAssetCategory(null);
     setAssetNote(null);
     setExpanded(false);
     pollAttemptsRef.current = 0;
@@ -138,6 +140,7 @@ export default function WatchVideo() {
     setAssetsError('');
     setAssetSteps(null);
     setContentType(null);
+    setAssetCategory(null);
     setAssetNote(null);
     setActiveResultTab('assets');
     try {
@@ -150,6 +153,7 @@ export default function WatchVideo() {
       if (!resp.ok) throw new Error(data.error || 'Failed to generate assets breakdown');
       setAssetSteps(data.steps || null);
       setContentType(data.contentType || null);
+      setAssetCategory(data.category || null);
       setAssetNote(data.note || null);
     } catch (err) {
       setAssetsError(err.message || 'Failed to generate assets breakdown');
@@ -289,7 +293,7 @@ export default function WatchVideo() {
 
                 {!assetsLoading && !assetsError && contentType && (
                   <span className={`content-type-badge content-type-${contentType}`}>
-                    {contentType.charAt(0).toUpperCase() + contentType.slice(1)}
+                    {assetCategory || (contentType.charAt(0).toUpperCase() + contentType.slice(1))}
                   </span>
                 )}
 
